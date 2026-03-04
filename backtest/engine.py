@@ -1,4 +1,4 @@
-"""バックテストエンジン v12.4: 加速TS + 12:00エントリー制限"""
+"""バックテストエンジン v12.4: 加速TS + 11:00エン��リー制限"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -88,11 +88,11 @@ class BacktestEngine:
         return timestamp.hour >= 14 and timestamp.minute >= 30
 
     def _is_morning_session(self, timestamp):
-        """v12.4: 9:00〜12:00のみエントリー許可"""
+        """v12.4: 9:00〜11:00のみエントリー許可"""
         if not hasattr(timestamp, "hour"):
             return True
         t = timestamp.hour * 100 + timestamp.minute
-        return 900 <= t <= 1200
+        return 900 <= t <= 1100
 
     def _close_position(self, pos, current_price, date, reason):
         if pos.side == Side.LONG:
@@ -210,7 +210,7 @@ class BacktestEngine:
                 elif pos.side == Side.SHORT and current_price >= pos.stop_loss:
                     exit_reason = f"損切り ({pos.stop_loss:.0f})"
                 elif pos.side == Side.LONG and current_price >= pos.take_profit:
-                    exit_reason = f"利確 ({pos.take_profit:.0f})"
+                    exit_reason = f"利�� ({pos.take_profit:.0f})"
                 elif pos.side == Side.SHORT and current_price <= pos.take_profit:
                     exit_reason = f"利確 ({pos.take_profit:.0f})"
                 elif self.trailing_enabled:
@@ -245,7 +245,7 @@ class BacktestEngine:
             if (
                 not is_close_time
                 and not is_cutoff
-                and self._is_morning_session(date)    # ★ ここが効いていなかった！
+                and self._is_morning_session(date)
                 and abs(daily_loss) < self.initial_capital * self.max_daily_loss
             ):
                 for ticker, df in signals_dict.items():
@@ -318,7 +318,7 @@ class BacktestEngine:
                     )
                     positions.append(pos)
 
-            # === 3. 産評価 ===
+            # === 3. 資産評価 ===
             unrealized = 0
             for pos in positions:
                 if pos.ticker in signals_dict and date in signals_dict[pos.ticker].index:
