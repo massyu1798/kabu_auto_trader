@@ -1,5 +1,5 @@
 # ============================================
-# 戦略パラメータ（v12.4: 加速TS + 12:00エントリー制限）
+# 戦略パラメータ（v12.4: モーニング・モメンタム復元版）
 # ============================================
 
 global:
@@ -59,19 +59,19 @@ strategies:
 
 ensemble:
   buy_threshold: 1.2
-  sell_threshold: -2.5
+  sell_threshold: -99.0           # -2.5 → -99.0 に復元（ショート無効化）
 
 exit:
   atr_period: 14
-  stop_loss_atr_multiplier: 2.5
-  take_profit_rr_ratio: 2.5
+  stop_loss_atr_multiplier: 1.5   # 2.5 → 1.5 に復元（タイト損切り）
+  take_profit_rr_ratio: 3.0       # 2.5 → 3.0 に復元（利益を伸ばす）
   trailing_stop: true
   trailing_atr_multiplier: 2.0
 
 cooldown:
   enabled: true
-  bars_after_loss: 12
-  bars_after_win: 3
+  bars_after_loss: 15             # 12 → 15 に復元
+  bars_after_win: 5               # 3 → 5 に復元
 
 trend_filter:
   enabled: true
