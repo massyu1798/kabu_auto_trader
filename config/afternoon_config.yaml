@@ -1,12 +1,12 @@
 # ============================================
-# 午後リバーサル戦���パラメータ
+# 午後リバーサル戦略パラメータ v1.1
 # ============================================
 
 global:
   initial_capital: 3000000
-  max_positions: 3                # 午前と合わせて最大5を想定（午前5 + 午後3���
-  risk_per_trade: 0.006           # 午前より控えめ（逆張りリスク考慮）
-  max_daily_loss: 0.02            # 午後単体での最大損失
+  max_positions: 3
+  risk_per_trade: 0.006
+  max_daily_loss: 0.02
   commission_rate: 0.0
   slippage_rate: 0.001
 
@@ -19,34 +19,34 @@ screening:
   max_stocks: 60
 
 afternoon_reversal:
-  # エントリー時間��
-  entry_start: 1230               # 12:30 から
-  entry_end: 1400                 # 14:00 まで
+  # エントリー時間帯
+  entry_start: 1230
+  entry_end: 1400
 
   # 午前変動率フィルター
-  min_morning_move_pct: 1.5       # 寄りから1.5%以上動いた銘柄のみ対象
+  min_morning_move_pct: 1.0       # �� 1.5 → 1.0（対象銘柄を増やす）
 
-  # RSI設���
+  # RSI設定
   rsi_period: 14
-  rsi_oversold: 25                # 午前の20より緩め（午後は動きが小さい）
-  rsi_overbought: 75
+  rsi_oversold: 30                # ★ 25 → 30（エントリー機会増）
+  rsi_overbought: 70              # ★ 75 → 70（エントリー機会増）
 
   # ボリンジャーバンド設定
   bb_period: 20
-  bb_std: 2.0
+  bb_std: 1.8                     # ★ 2.0 → 1.8（条件緩和）
 
   # 出来高フィルター
-  volume_surge_ratio: 1.3         # 平均の1.3倍以上
+  volume_surge_ratio: 1.3
 
 exit:
   atr_period: 14
-  stop_loss_atr_multiplier: 1.5   # タイトめ（逆張りなので早め損切り）
-  take_profit_atr_multiplier: 2.0 # VWAP回帰が主目標
+  stop_loss_atr_multiplier: 1.5
+  take_profit_atr_multiplier: 2.0
   trailing_stop: true
-  trailing_atr_multiplier: 1.5    # タイトめ
-  force_close_time: 1450          # 14:50に強制決済
+  trailing_atr_multiplier: 2.0    # ★ 1.5 → 2.0（TSを緩めてVWAP到達を待つ）
+  force_close_time: 1450
 
 cooldown:
   enabled: true
-  bars_after_loss: 6              # 午後は時間が短いので短め
+  bars_after_loss: 6
   bars_after_win: 2
