@@ -1,0 +1,29 @@
+# === APIキー・パスワード等の機密情報 ===
+config/live_config.json
+config/*secret*
+*.env
+
+# === Python関連 ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === 仮想環境 ===
+venv/
+.venv/
+env/
+
+# === ログ・一時ファイル ===
+logs/
+*.log
+
+# === OS・エディタ関連 ===
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+*.swo

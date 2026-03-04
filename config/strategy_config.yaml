@@ -1,0 +1,78 @@
+# ============================================
+# 戦略パラメータ（v12: モーニング・モメンタム）
+# ============================================
+
+global:
+  initial_capital: 3000000  # ←ここを 7000000 から 3000000 に修正
+  max_positions: 4
+  risk_per_trade: 0.008
+  max_daily_loss: 0.03
+  commission_rate: 0.0
+  slippage_rate: 0.001
+  max_holding_days: 0
+
+screening:
+  enabled: true
+  min_volume: 200000
+  min_price: 500                # 低位株を排除
+  max_price: 40000
+  min_atr_pct: 0.7
+  max_stocks: 60                # 60銘柄
+
+daily_bias:
+  ema_short: 5
+  ema_long: 25
+
+strategies:
+  trend_follow:
+    enabled: true
+    weight: 1.5                 # 順張りを最重視
+    params:
+      ema_short: 5
+      ema_long: 20
+      macd_fast: 12
+      macd_slow: 26
+      macd_signal: 9
+
+  mean_reversion:
+    enabled: true
+    weight: 0.4                 # 逆張りはさらに慎重に
+    params:
+      rsi_period: 14
+      rsi_oversold: 20
+      rsi_overbought: 80
+      bb_period: 20
+      bb_std: 2.5
+
+  breakout:
+    enabled: true
+    weight: 1.2
+    params:
+      channel_period: 20
+
+  volume_profile:
+    enabled: true
+    weight: 1.0
+    params:
+      vwap_period: 20
+      volume_surge_ratio: 1.5
+
+ensemble:
+  buy_threshold: 1.2            # 1.0→1.2 根拠が重なった時のみ
+  sell_threshold: -99.0
+
+exit:
+  stop_loss_atr_multiplier: 1.5   # 2.5→1.5 損切りをタイトに
+  take_profit_rr_ratio: 3.0       # 2.0→3.0 利益を大きく伸ばす
+  atr_period: 14
+  trailing_stop: true
+  trailing_atr_multiplier: 2.0    # 利益確保を優先
+
+cooldown:
+  enabled: true
+  bars_after_loss: 15
+  bars_after_win: 5
+
+trend_filter:
+  enabled: true
+  ema_period: 60

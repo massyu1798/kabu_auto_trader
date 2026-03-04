@@ -1,0 +1,334 @@
+1. main_backtest.py の書き換え
+
+notepad main_backtest.py
+中身をすべて消して、以下を貼り付けてください：
+
+
+"""
+バックテスト v12: 1時間足・過去1年検証モデル
+- タイムフレーム: 1時間足 (interval="1h")
+- 期間: 過去1年間 (period="1y")
+- 目的: 長期的な市場の波に対するロジックの堅牢性確認
+"""
+
+import pandas as pd
+import yfinance as yf
+import yaml
+import pandas_ta as ta
+from datetime import datetime, timedelta
+from backtest.engine import BacktestEngine
+from backtest.reporter import generate_report, plot_equity_curve
+from backtest.screener import screen_stocks
+from strategy.ensemble import EnsembleEngine
+
+def load_hourly_data(ticker):
+    """1時間足データを1年分取得"""
+    # yfinanceの制限: 1hデータは過去730日まで取得可能
+    data = yf.download(ticker, period="1y", interval="1h", progress=False)
+    
+    if data.empty: return None
+    
+    # カラム名整理
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = [col[0].lower() for col in data.columns]
+    else:
+        data.columns = [col.lower() for col in data.columns]
+        
+    data = data[["open", "high", "low", "close", "volume"]].copy()
+    data.dropna(inplace=True)
+    
+    # タイムゾーン変換 (UTC -> Asia/Tokyo)
+    if data.index.tz is not None:
+        data.index = data.index.tz_convert("Asia/Tokyo")
+    else:
+        data.index = data.index.tz_localize("UTC").tz_convert("Asia/Tokyo")
+        
+    return data
+
+def load_daily_data(ticker):
+    """日足データを2年分取得（1年間のバックテストに十分なバッファを持たせる）"""
+    data = yf.download(ticker, period="2y", interval="1d", progress=False)
+    if data.empty: return None
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = [col[0].lower() for col in data.columns]
+    else:
+        data.columns = [col.lower() for col in data.columns]
+    data = data[["open", "high", "low", "close", "volume"]].copy()
+    data.dropna(inplace=True)
+    return data
+
+def calc_daily_bias(daily_df, config):
+    """日足でのトレンド判定"""
+    dc = config["daily_bias"]
+    df = daily_df.copy()
+    df["ema_s"] = ta.ema(df["close"], length=dc["ema_short"])
+    df["ema_l"] = ta.ema(df["close"], length=dc["ema_long"])
+    
+    bias = {}
+    for idx, row in df.iterrows():
+        date = idx.date()
+        if pd.isna(row["ema_s"]) or pd.isna(row["ema_l"]):
+            bias[date] = "NEUTRAL"
+        elif row["ema_s"] > row["ema_l"]:
+            bias[date] = "BULL"
+        else:
+            bias[date] = "BEAR"
+    return bias
+
+def apply_timeframe_filter(signals_df, daily_bias):
+    """日足トレンドと1時間足シグナルの整合性チェック"""
+    result = signals_df.copy()
+    filtered = 0
+    for idx in result.index:
+        date = idx.date()
+        bias = daily_bias.get(date, "NEUTRAL")
+        signal = result.loc[idx, "final_signal"]
+        
+        # BULLならSELL禁止、BEARならBUY禁止
+        if bias == "BULL" and signal == "SELL":
+            result.loc[idx, "final_signal"] = "HOLD"
+            filtered += 1
+        elif bias == "BEAR" and signal == "BUY":
+            result.loc[idx, "final_signal"] = "HOLD"
+            filtered += 1
+            
+    return result, filtered
+
+def main():
+    print("=" * 60)
+    print("  📊 日本株バックテスト v12: 1時間足・過去1年検証")
+    print("=" * 60)
+
+    with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    # 1時間足でもスクリーニングを適用（直近のボラティリティが高い銘柄）
+    print("\n■ 銘柄スクリーニング中...")
+    selected = screen_stocks(config)
+    tickers = [s["ticker"] for s in selected]
+
+    if not tickers:
+        print("銘柄が見つかりませんでした。")
+        return
+
+    print(f"\n■ データロード & 解析（対象: {len(tickers)}銘柄）...")
+    ensemble = EnsembleEngine("config/strategy_config.yaml")
+    signals_dict = {}
+    
+    total_processed = 0
+    for ticker in tickers:
+        try:
+            df_1h = load_hourly_data(ticker)
+            df_daily = load_daily_data(ticker)
+            if df_1h is None or df_daily is None or len(df_1h) < 100:
+                continue
+            
+            bias = calc_daily_bias(df_daily, config)
+            signals_df = ensemble.generate_ensemble_signals(df_1h)
+            signals_df, _ = apply_timeframe_filter(signals_df, bias)
+            
+            signals_dict[ticker] = signals_df
+            total_processed += 1
+            print(f"  [{total_processed}/{len(tickers)}] {ticker} 完了")
+        except Exception as e:
+            print(f"  ❌ {ticker} エラー: {e}")
+
+    print(f"\n■ バックテストシミュレーション中（1年分）...")
+    engine = BacktestEngine("config/strategy_config.yaml")
+    result = engine.run(signals_dict)
+
+    print("\n" + "=" * 60)
+    report = generate_report(result, engine.initial_capital)
+    print(report)
+
+    if result.trades:
+        # 取引日数を算出
+        all_dates = set(t.entry_date.date() for t in result.trades)
+        total_days = len(all_dates)
+        if total_days > 0:
+            print(f"  🔥 総取引回数: {len(result.trades)} 回")
+            print(f"  🔥 1日平均取引数: {len(result.trades)/total_days:.2f} 回")
+        
+        longs = [t for t in result.trades if t.side.value == "LONG"]
+        shorts = [t for t in result.trades if t.side.value == "SHORT"]
+        print(f"  📈 ロング: {len(longs)}回 (勝率 {len([t for t in longs if t.pnl>0])/max(len(longs),1)*100:.1f}%)")
+        print(f"  📉 ショート: {len(shorts)}回 (勝率 {len([t for t in shorts if t.pnl>0])/max(len(shorts),1)*100:.1f}%)")
+
+    plot_equity_curve(result, engine.initial_capital, save_path="equity_curve_1year.png")
+    print(f"\n✅ 1年分の検証完了。グラフ: equity_curve_1year.png")
+
+if __name__ == "__main__":
+    main()
+
+
+
+2. config/strategy_config.yaml の修正
+
+notepad config\strategy_config.yaml
+中身を以下にすべて書き換えて保存してください。エラーを解消し、1時間足での検証に最適化した設定です。
+
+
+# ============================================
+# 戦略パラメータ（v12: 1時間足・1年検証用）
+# ============================================
+
+global:
+  initial_capital: 7000000
+  max_positions: 5
+  risk_per_trade: 0.01          # 長期検証なので少しリスク許容度を上げる
+  max_daily_loss: 0.05
+  commission_rate: 0.0
+  slippage_rate: 0.001
+  max_holding_days: 5           # 1時間足なので数日持つスイングトレードを許可
+
+screening:
+  enabled: true
+  min_volume: 300000
+  min_price: 300
+  max_price: 30000
+  min_atr_pct: 1.0              # 1時間足でボラがあるものを厳選
+  max_stocks: 30
+
+daily_bias:
+  ema_short: 5
+  ema_long: 25
+
+strategies:
+  trend_follow:
+    enabled: true
+    weight: 1.5
+    params:
+      ema_short: 10             # 1時間足用に少し長めに設定
+      ema_long: 30
+      macd_fast: 12
+      macd_slow: 26
+      macd_signal: 9
+
+  mean_reversion:
+    enabled: true
+    weight: 0.4                 # トレンド重視のため逆張りは抑える
+    params:
+      rsi_period: 14
+      rsi_oversold: 30
+      rsi_overbought: 70
+      bb_period: 20
+      bb_std: 2.0
+
+  breakout:
+    enabled: true
+    weight: 1.2
+    params:
+      channel_period: 20
+
+  volume_profile:
+    enabled: true
+    weight: 1.0
+    params:
+      vwap_period: 20
+      volume_surge_ratio: 1.5
+
+ensemble:
+  buy_threshold: 1.0
+  sell_threshold: -1.5
+
+exit:
+  stop_loss_atr_multiplier: 2.0
+  take_profit_rr_ratio: 2.5
+  atr_period: 14                # <--- これが足りなかった設定です！
+  trailing_stop: true
+  trailing_atr_multiplier: 2.0
+
+cooldown:
+  enabled: true
+  bars_after_loss: 5            # 1時間足なので5時間休止
+  bars_after_win: 2
+
+trend_filter:
+  enabled: true
+  ema_period: 60
+
+
+3. (念のため) backtest/engine.py の修正
+今後、設定が漏れていても止まらないように、コード側でも対策（デフォルト値の設定）をしておきましょう。
+
+
+notepad backtest\engine.py
+self.atr_period = e["atr_period"] の周辺（67行目あたり）を、以下のように書き換えてください。
+
+
+        # 修正前： self.atr_period = e["atr_period"]
+        # 修正後： .get() を使って、設定がなければ14をデフォルトにする
+        self.atr_period = e.get("atr_period", 14)
+
+
+4. 再実行
+保存ができたら、もう一度実行してください。
+
+
+python main_backtest.py
+v12 の期待値
+5分足ではノイズが多くて勝率が安定しませんでしたが、1時間足（1時間ごとに判断）にすることで、ダマシが減り、本来のトレンドフォローの力が発揮されるはずです。
+
+もしこれで利益が出るようなら、そのロジックを「監視は1分ごと、判断は1時間ごと」という形で Bot に落とし込むのが最も安定した自動売買になります。
+
+結果を楽しみにお待ちしています！
+
+05:57
+Gemini Flash
+
+
+
+
+よい感じですね
+ バックテストレポート
+============================================================
+
+■ 概要
+  初期資金:            7,000,000 円
+  最終資金:           10,630,381 円
+  純損益:             +3,624,975 円 (+51.79%)
+  最大DD:                 13.79 %
+
+■ トレード統計
+  総トレード数:   179
+  勝ちトレード:   79 (44.1%)
+  負けトレード:   100 (55.9%)
+  平均利益:             +156,868 円
+  平均損失:              -87,676 円
+  PF:             1.41
+
+■ ロング/ショート別
+  ロング:         179回  (勝率 44.1%)
+  ショート:       0回 (勝率 0.0%)
+
+■ トレード履歴（直近20件）
+Entry       Exit        Ticker    Side    Entry価格    Exit価格    損益        損益%      Exit理由
+----------  ----------  --------  ------  ---------  --------  --------  -------  -----------
+2026-01-21  2026-01-23  6857.T    LONG    21,887     23,427    +277,143  +7.03%   利確 (23281)
+2026-01-23  2026-01-26  8035.T    LONG    42,402     41,129    -143,909  -3.00%   損切り (41492)
+2026-01-27  2026-01-29  6857.T    LONG    24,119     27,767    +569,105  +15.13%  利確 (25748)
+2026-01-29  2026-01-30  8035.T    LONG    42,272     40,759    -139,199  -3.58%   損切り (41106)
+2026-01-30  2026-02-04  4519.T    LONG    8,836      8,737     -53,032   -1.12%   TS (8790)
+2026-01-30  2026-02-04  6857.T    LONG    26,221     25,025    -99,288   -4.56%   TS (25153)
+2026-02-04  2026-02-05  6954.T    LONG    6,521      6,547     +19,606   +0.41%   TS (6576)
+2026-02-05  2026-02-06  4519.T    LONG    9,293      8,750     -241,111  -5.84%   損切り (9057)
+2026-02-06  2026-02-10  7741.T    LONG    26,366     28,032    +259,834  +6.32%   利確 (28005)
+2026-02-10  2026-02-12  6501.T    LONG    5,693      5,579     -76,119   -1.99%   TS (5590)
+2026-02-05  2026-02-13  6752.T    LONG    2,382      2,479     +115,774  +4.06%   TS (2530)
+2026-02-13  2026-02-13  6273.T    LONG    72,422     70,769    -67,781   -2.28%   TS (70918)
+2026-02-12  2026-02-17  6857.T    LONG    26,892     26,553    -35,875   -1.26%   TS (26677)
+2026-02-16  2026-02-17  6273.T    LONG    74,184     72,108    -83,052   -2.80%   TS (72406)
+2026-02-17  2026-02-20  8058.T    LONG    4,913      4,971     +68,403   +1.18%   TS (5011)
+2026-02-20  2026-02-24  6503.T    LONG    5,790      5,797     +7,161    +0.13%   TS (5837)
+2026-02-24  2026-02-25  6861.T    LONG    64,214     68,511    +317,998  +6.69%   利確 (67700)
+2026-02-25  2026-02-26  6857.T    LONG    27,512     27,398    -17,007   -0.42%   TS (28426)
+2026-02-26  2026-02-27  7203.T    LONG    3,805      3,745     -107,011  -1.57%   TS (3756)
+2026-02-27  2026-02-27  4063.T    LONG    6,151      6,158     +5,868    +0.11%   BT終了決済
+  🔥 総取引回数: 179 回
+  🔥 1日平均取引数: 1.23 回
+  📈 ロング: 179回 (勝率 44.1%)
+  📉 ショート: 0回 (勝率 0.0%)
+
+📈 グラフ保存: equity_curve_1year.png
+
+✅ 1年分の検証完了。グラフ: equity_curve_1year.png

@@ -1,0 +1,255 @@
+v12 の改善点：時間と質の限定
+ゴールデンタイム・フィルター: エントリーを 9:05 〜 11:00 に限定します。午後のダラダラした動きでの「往復ビンタ」を物理的にカットします。
+閾値の引き上げ (1.2): 複数の指標が強く一致した時のみエントリーするようにし、トレードの「質」を最優先します。
+損切りのタイト化 (1.5): 傷が浅いうちに切る「損小利大」に戻し、PFを強制的に引き上げます。
+銘柄プールの微増 (60銘柄): 時間を絞る分、監視対象を少し増やしてチャンスを確保します。
+1. config/strategy_config.yaml (v12)
+
+notepad config\strategy_config.yaml
+以下をすべて上書きしてください。
+
+
+# ============================================
+# 戦略パラメータ（v12: モーニング・モメンタム）
+# ============================================
+
+global:
+  initial_capital: 7000000
+  max_positions: 5
+  risk_per_trade: 0.008
+  max_daily_loss: 0.03
+  commission_rate: 0.0
+  slippage_rate: 0.001
+  max_holding_days: 0
+
+screening:
+  enabled: true
+  min_volume: 200000
+  min_price: 500                # 低位株を排除
+  max_price: 40000
+  min_atr_pct: 0.7
+  max_stocks: 60                # 60銘柄
+
+daily_bias:
+  ema_short: 5
+  ema_long: 25
+
+strategies:
+  trend_follow:
+    enabled: true
+    weight: 1.5                 # 順張りを最重視
+    params:
+      ema_short: 5
+      ema_long: 20
+      macd_fast: 12
+      macd_slow: 26
+      macd_signal: 9
+
+  mean_reversion:
+    enabled: true
+    weight: 0.4                 # 逆張りはさらに慎重に
+    params:
+      rsi_period: 14
+      rsi_oversold: 20
+      rsi_overbought: 80
+      bb_period: 20
+      bb_std: 2.5
+
+  breakout:
+    enabled: true
+    weight: 1.2
+    params:
+      channel_period: 20
+
+  volume_profile:
+    enabled: true
+    weight: 1.0
+    params:
+      vwap_period: 20
+      volume_surge_ratio: 1.5
+
+ensemble:
+  buy_threshold: 1.2            # 1.0→1.2 根拠が重なった時のみ
+  sell_threshold: -99.0
+
+exit:
+  stop_loss_atr_multiplier: 1.5   # 2.5→1.5 損切りをタイトに
+  take_profit_rr_ratio: 3.0       # 2.0→3.0 利益を大きく伸ばす
+  atr_period: 14
+  trailing_stop: true
+  trailing_atr_multiplier: 2.0    # 利益確保を優先
+
+cooldown:
+  enabled: true
+  bars_after_loss: 15
+  bars_after_win: 5
+
+trend_filter:
+  enabled: true
+  ema_period: 60
+
+
+2. main_backtest.py (v12)
+「午前中のみエントリー」というデイトレの黄金律をコードに組み込みます。
+
+
+notepad main_backtest.py
+
+"""
+バックテスト v12: モーニング・モメンタム
+- エントリーを 9:05 〜 11:00 に限定
+- 1.5 ATR 損切り / 3.0 R:R
+- 銘柄数 60
+"""
+
+import pandas as pd
+import yfinance as yf
+import yaml
+import pandas_ta as ta
+from datetime import datetime
+from backtest.engine import BacktestEngine
+from backtest.reporter import generate_report, plot_equity_curve
+from backtest.screener import screen_stocks
+from strategy.ensemble import EnsembleEngine
+
+def load_intraday(ticker):
+    data = yf.download(ticker, period="60d", interval="5m", progress=False)
+    if data.empty: return None
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = [col[0].lower() for col in data.columns]
+    else:
+        data.columns = [col.lower() for col in data.columns]
+    data = data[["open", "high", "low", "close", "volume"]].copy()
+    data.dropna(inplace=True)
+    if data.index.tz is not None:
+        data.index = data.index.tz_convert("Asia/Tokyo")
+    else:
+        data.index = data.index.tz_localize("UTC").tz_convert("Asia/Tokyo")
+    # VWAPを計算して追加
+    data["vwap"] = ta.vwap(data["high"], data["low"], data["close"], data["volume"])
+    data = data[(data.index.hour >= 9) & ((data.index.hour < 15) | ((data.index.hour == 15) & (data.index.minute <= 25)))]
+    return data
+
+def main():
+    print("=" * 60)
+    print("  🌅 日本株自動売買 v12: モーニング・モメンタム")
+    print("=" * 60)
+
+    with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    print("\n■ スクリーニング中 (60銘柄選定)...")
+    selected = screen_stocks(config)
+    tickers = [s["ticker"] for s in selected]
+
+    print(f"\n■ 解析・シグナル生成...")
+    ensemble = EnsembleEngine("config/strategy_config.yaml")
+    signals_dict = {}
+    
+    for ticker in tickers:
+        try:
+            df_5m = load_intraday(ticker)
+            if df_5m is None or len(df_5m) < 50: continue
+            
+            signals_df = ensemble.generate_ensemble_signals(df_5m)
+            
+            # v12 厳格フィルター
+            for idx in signals_df.index:
+                row = signals_df.loc[idx]
+                
+                # 1. 時間外フィルター (9:05 〜 11:00 以外は新規エントリー禁止)
+                t = idx.hour * 100 + idx.minute
+                if not (905 <= t <= 1100):
+                    signals_df.loc[idx, "final_signal"] = "HOLD"
+                    continue
+                
+                # 2. VWAPフィルター (VWAPより下での買いは禁止)
+                if signals_df.loc[idx, "final_signal"] == "BUY":
+                    if row["close"] < row["vwap"]:
+                        signals_df.loc[idx, "final_signal"] = "HOLD"
+            
+            signals_dict[ticker] = signals_df
+            print(".", end="", flush=True)
+        except Exception: continue
+
+    print("\n\n■ バックテスト実行...")
+    engine = BacktestEngine("config/strategy_config.yaml")
+    result = engine.run(signals_dict)
+
+    print("\n" + "=" * 60)
+    report = generate_report(result, engine.initial_capital)
+    print(report)
+
+    if result.trades:
+        days = len(set(t.entry_date.date() for t in result.trades))
+        freq = len(result.trades) / days if days > 0 else 0
+        print(f"  🔥 1日平均取引数: {freq:.2f} 回")
+        win_trades = [t for t in result.trades if t.pnl > 0]
+        print(f"  📊 トータル勝率: {(len(win_trades)/len(result.trades)*100):.1f}%")
+
+    plot_equity_curve(result, engine.initial_capital, save_path="equity_curve.png")
+    print("\n✅ v12 テスト完了。")
+
+if __name__ == "__main__":
+    main()
+3. 実行
+
+python main_backtest.py
+v12 期待のポイント
+勝率の改善: 朝の勢いがある時間帯に限定し、VWAPより上の「強い銘柄」だけを狙うため、勝率が40%を突破するはずです。
+ドローダウンの軽減: 午後の「削られるトレード」が無くなるため、資産曲線が安定します。
+純損益の黒字化: PF 1.0 突破の最終試験です。
+
+
+いい感じです！
+バックテストに過剰最適はされていませんか？
+バックテストレポート
+============================================================
+
+■ 概要
+  初期資金:            7,000,000 円
+  最終資金:            7,983,579 円
+  純損益:               +983,579 円 (+14.05%)
+  最大DD:                  4.76 %
+
+■ トレード統計
+  総トレード数:   43
+  勝ちトレード:   19 (44.2%)
+  負けトレード:   24 (55.8%)
+  平均利益:             +115,394 円
+  平均損失:              -50,371 円
+  PF:             1.81
+
+■ ロング/ショート別
+  ロング:         43回  (勝率 44.2%)
+  ショート:       0回 (勝率 0.0%)
+
+■ トレード履歴（直近20件）
+Entry       Exit        Ticker    Side    Entry価格    Exit価格    損益        損益%     Exit理由
+----------  ----------  --------  ------  ---------  --------  --------  ------  -----------
+2026-02-03  2026-02-03  7741.T    LONG    27,057     27,198    +21,393   +0.52%  TS (27373)
+2026-02-04  2026-02-04  9984.T    LONG    4,296      4,277     -29,164   -0.46%  TS (4290)
+2026-02-05  2026-02-05  6752.T    LONG    2,455      2,459     +5,509    +0.15%  TS (2463)
+2026-02-05  2026-02-05  4519.T    LONG    9,376      9,318     -40,440   -0.63%  TS (9334)
+2026-02-06  2026-02-06  6758.T    LONG    3,429      3,436     +9,810    +0.18%  TS (3442)
+2026-02-06  2026-02-06  6857.T    LONG    24,009     24,121    +31,995   +0.47%  TS (24249)
+2026-02-09  2026-02-09  8035.T    LONG    41,672     41,199    -71,876   -1.13%  損切り (41271)
+2026-02-09  2026-02-09  9983.T    LONG    68,909     67,882    -92,411   -1.49%  損切り (68239)
+2026-02-09  2026-02-09  6857.T    LONG    28,098     27,597    -72,601   -1.78%  損切り (27687)
+2026-02-10  2026-02-10  9984.T    LONG    4,482      4,641     +191,763  +3.54%  利確 (4630)
+2026-02-10  2026-02-10  9984.T    LONG    4,697      4,666     -33,673   -0.65%  TS (4689)
+2026-02-12  2026-02-12  9984.T    LONG    4,883      4,881     -2,355    -0.04%  TS (4892)
+2026-02-13  2026-02-13  6273.T    LONG    75,475     73,357    -82,634   -2.81%  損切り (73950)
+2026-02-16  2026-02-16  6098.T    LONG    6,332      6,251     -86,315   -1.29%  損切り (6276)
+2026-02-16  2026-02-16  9984.T    LONG    4,544      4,671     +174,299  +2.81%  利確 (4674)
+2026-02-18  2026-02-18  6762.T    LONG    2,359      2,438     +184,951  +3.34%  利確 (2437)
+2026-02-24  2026-02-24  6981.T    LONG    3,872      3,974     +182,447  +2.64%  利確 (3976)
+2026-02-25  2026-02-25  4307.T    LONG    3,844      3,785     -81,143   -1.53%  損切り (3798)
+2026-02-26  2026-02-26  6098.T    LONG    6,695      6,801     +100,646  +1.59%  TS (6811)
+2026-02-27  2026-02-27  6758.T    LONG    3,594      3,599     +11,144   +0.16%  TS (3605)
+  🔥 1日平均取引数: 1.23 回
+  📊 トータル勝率: 44.2%
+
+📈 グラフ保存: equity_curve.png
+
+✅ v12 テスト完了。

@@ -1,0 +1,19 @@
+Bot稼働中...
+  ✅ トークン取得成功
+  📝 [PAPER] BUY 6098 × 500株 @ 6777円
+       SL=6709 TP=6913 |
+  ✅ [PAPER] 決済 6098 | +500円 | Exit triggered
+  📝 [PAPER] BUY 8306 × 1200株 @ 2776円
+       SL=2749 TP=2832 |
+  ✅ [PAPER] 決済 8306 | +5,400円 | Exit triggered
+  📝 [PAPER] BUY 6981 × 900株 @ 3768円
+       SL=3730 TP=3843 |
+  📝 [PAPER] BUY 6758 × 1000株 @ 3384円
+       SL=3350 TP=3452 |
+  ✅ [PAPER] 決済 6981 | +900円 | Exit triggered
+  ✅ [PAPER] 決済 6758 | +4,000円 | Exit triggered
+  📝 [PAPER] BUY 6098 × 500株 @ 6765円
+       SL=6697 TP=6900 |
+  ✅ [PAPER] 決済 6098 | +1,000円 | Exit triggered
+
+停止しました

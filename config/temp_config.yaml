@@ -1,0 +1,64 @@
+cooldown:
+  bars_after_loss: 12
+  bars_after_win: 3
+  enabled: true
+daily_bias:
+  ema_long: 25
+  ema_short: 5
+ensemble:
+  buy_threshold: 1.2
+  sell_threshold: -2.5
+exit:
+  atr_period: 14
+  stop_loss_atr_multiplier: 2.5
+  take_profit_rr_ratio: 2.5
+  trailing_atr_multiplier: 2.0
+  trailing_stop: true
+global:
+  commission_rate: 0.0
+  initial_capital: 7000000
+  max_daily_loss: 0.03
+  max_holding_days: 0
+  max_positions: 4
+  risk_per_trade: 0.008
+  slippage_rate: 0.001
+screening:
+  enabled: true
+  max_price: 15000
+  max_stocks: 20
+  min_atr_pct: 0.8
+  min_price: 300
+  min_volume: 300000
+strategies:
+  breakout:
+    enabled: true
+    params:
+      channel_period: 20
+    weight: 1.0
+  mean_reversion:
+    enabled: true
+    params:
+      bb_period: 20
+      bb_std: 2.5
+      rsi_overbought: 80
+      rsi_oversold: 20
+      rsi_period: 14
+    weight: 0.8
+  trend_follow:
+    enabled: true
+    params:
+      ema_long: 25
+      ema_short: 8
+      macd_fast: 12
+      macd_signal: 9
+      macd_slow: 26
+    weight: 1.0
+  volume_profile:
+    enabled: true
+    params:
+      volume_surge_ratio: 1.5
+      vwap_period: 20
+    weight: 0.8
+trend_filter:
+  ema_period: 60
+  enabled: true
