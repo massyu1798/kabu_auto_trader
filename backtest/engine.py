@@ -204,7 +204,7 @@ class BacktestEngine:
                                 pos.trailing_stop = new_trail
 
                 if is_daytrade and is_close_time:
-                    exit_reason = "引け強制決���"
+                    exit_reason = "引け強制決"
                 elif pos.side == Side.LONG and current_price <= pos.stop_loss:
                     exit_reason = f"損切り ({pos.stop_loss:.0f})"
                 elif pos.side == Side.SHORT and current_price >= pos.stop_loss:
@@ -245,7 +245,7 @@ class BacktestEngine:
             if (
                 not is_close_time
                 and not is_cutoff
-                and self._is_morning_session(date)
+                and self._is_morning_session(date)    # ★ ここが効いていなかった！
                 and abs(daily_loss) < self.initial_capital * self.max_daily_loss
             ):
                 for ticker, df in signals_dict.items():
@@ -318,7 +318,7 @@ class BacktestEngine:
                     )
                     positions.append(pos)
 
-            # === 3. ��産評価 ===
+            # === 3. 産評価 ===
             unrealized = 0
             for pos in positions:
                 if pos.ticker in signals_dict and date in signals_dict[pos.ticker].index:
