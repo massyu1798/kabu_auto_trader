@@ -26,4 +26,4 @@ logs/
 Thumbs.db
 .vscode/
 *.swp
-*.swo
+*.swoconfig/live_config.yaml 
