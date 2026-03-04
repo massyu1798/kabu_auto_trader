@@ -1,5 +1,5 @@
 # ============================================
-# 戦略パラメータ（v12.4: モーニング・モメンタム復元版）
+# Strategy Config (v12.4: Morning Momentum - Restored)
 # ============================================
 
 global:
@@ -14,10 +14,10 @@ global:
 screening:
   enabled: true
   min_volume: 200000
-  min_price: 500                # 低位株を排除
+  min_price: 500                # Exclude penny stocks
   max_price: 40000
   min_atr_pct: 0.7
-  max_stocks: 60                # 60銘柄
+  max_stocks: 60                # 60 stocks
 
 daily_bias:
   ema_short: 5
@@ -26,7 +26,7 @@ daily_bias:
 strategies:
   trend_follow:
     enabled: true
-    weight: 1.5                 # 順張りを最重視
+    weight: 1.5                 # Trend-following priority
     params:
       ema_short: 5
       ema_long: 20
@@ -36,7 +36,7 @@ strategies:
 
   mean_reversion:
     enabled: true
-    weight: 0.4                 # 逆張りはさらに慎重に
+    weight: 0.4                 # Mean reversion (conservative)
     params:
       rsi_period: 14
       rsi_oversold: 20
@@ -59,19 +59,19 @@ strategies:
 
 ensemble:
   buy_threshold: 1.2
-  sell_threshold: -99.0           # -2.5 → -99.0 に復元（ショート無効化）
+  sell_threshold: -99.0           # Restored from -2.5 (disable short)
 
 exit:
   atr_period: 14
-  stop_loss_atr_multiplier: 1.5   # 2.5 → 1.5 に復元（タイト損切り）
-  take_profit_rr_ratio: 3.0       # 2.5 → 3.0 に復元（利益を伸ばす）
+  stop_loss_atr_multiplier: 1.5   # Restored from 2.5 (tight SL)
+  take_profit_rr_ratio: 3.0       # Restored from 2.5 (extend profit)
   trailing_stop: true
   trailing_atr_multiplier: 2.0
 
 cooldown:
   enabled: true
-  bars_after_loss: 15             # 12 → 15 に復元
-  bars_after_win: 5               # 3 → 5 に復元
+  bars_after_loss: 15             # Restored from 12
+  bars_after_win: 5               # Restored from 3
 
 trend_filter:
   enabled: true
