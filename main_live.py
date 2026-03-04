@@ -1,5 +1,5 @@
 """
-日本株自動売買Bot v12.4（加速TS + 正式ATR + 11:00エントリー制��）
+JP Stock Auto Trading Bot v12.4 (Accel TS + ATR + VWAP Filter)
 """
 
 import time
@@ -25,13 +25,13 @@ def is_market_open() -> bool:
     return 900 <= t <= 1525
 
 def is_entry_allowed() -> bool:
-    """v12.4: 9:05〜11:00のみ新規エントリー許可"""
+    """v12.4: 9:05-11:00 only"""
     now = datetime.now()
     t = now.hour * 100 + now.minute
     return 905 <= t <= 1100
 
 def calc_atr(price_hist: dict, period: int = 14) -> float | None:
-    """price_historyからpandas_taで正式なATRを��算"""
+    """Calculate ATR using pandas_ta"""
     h = price_hist["high"]
     l = price_hist["low"]
     c = price_hist["close"]
@@ -43,12 +43,27 @@ def calc_atr(price_hist: dict, period: int = 14) -> float | None:
         return None
     return float(atr_series.iloc[-1])
 
+def calc_vwap(price_hist: dict) -> float | None:
+    """Calculate VWAP from price history (volume approximated by tick count)"""
+    h = price_hist["high"]
+    l = price_hist["low"]
+    c = price_hist["close"]
+    if len(c) < 5:
+        return None
+    # Typical Price = (High + Low + Close) / 3
+    # Without real volume, use cumulative typical price average
+    tp_sum = 0.0
+    for i in range(len(c)):
+        tp = (h[i] + l[i] + c[i]) / 3.0
+        tp_sum += tp
+    return tp_sum / len(c)
+
 def calc_signals(prices: list[float], strategy_config: dict) -> str:
     if len(prices) < 30: return "HOLD"
     
     df = pd.DataFrame({"close": prices})
     
-    # トレンドフォロー
+    # Trend follow
     tf = strategy_config["strategies"]["trend_follow"]["params"]
     ema_s = ta.ema(df["close"], length=tf["ema_short"])
     ema_l = ta.ema(df["close"], length=tf["ema_long"])
@@ -59,14 +74,13 @@ def calc_signals(prices: list[float], strategy_config: dict) -> str:
     last = len(df) - 1
     prev = last - 1
     
-    # NaNチェックを厳格化
     if not pd.isna(ema_l.iloc[last]) and not pd.isna(ema_l.iloc[prev]):
         if ema_s.iloc[last] > ema_l.iloc[last] and ema_s.iloc[prev] <= ema_l.iloc[prev]:
             score += 1.0
         elif ema_s.iloc[last] < ema_l.iloc[last] and ema_s.iloc[prev] >= ema_l.iloc[prev]:
             score -= 1.0
 
-    # ブレイクアウト
+    # Breakout
     bo = strategy_config["strategies"]["breakout"]["params"]
     period = bo["channel_period"]
     if last >= period:
@@ -74,7 +88,6 @@ def calc_signals(prices: list[float], strategy_config: dict) -> str:
         if df["close"].iloc[last] > high_max:
             score += 1.0
             
-    # 統合判定
     if score >= strategy_config["ensemble"]["buy_threshold"]:
         return "BUY"
     return "HOLD"
@@ -88,14 +101,14 @@ def main():
     price_history = {ticker: {"high": [], "low": [], "close": []} for ticker in live_cfg["watchlist"]}
     last_signal_time = 0
     
-    print("Bot稼働中... (v12.4 加速TS + 正式ATR)")
+    print("Bot running... (v12.4 Accel TS + ATR + VWAP Filter)")
 
     try:
         while True:
             if not is_market_open():
                 time.sleep(30); continue
 
-            # 株価取得
+            # Fetch prices
             for ticker in live_cfg["watchlist"]:
                 board = client.get_board(ticker)
                 if board and board.get("CurrentPrice"):
@@ -108,13 +121,13 @@ def main():
                     ph["high"].append(high_price)
                     ph["low"].append(low_price)
 
-                    # 最大500件に制限
+                    # Limit to 500 entries
                     for key in ("high", "low", "close"):
                         if len(ph[key]) > 500:
                             ph[key] = ph[key][-500:]
-                time.sleep(1)   # 1銘柄ごとに1秒待つ
+                time.sleep(1)
 
-            # ポジション管理
+            # Position management
             for pos in list(order_mgr.positions):
                 ph = price_history.get(pos.ticker)
                 if ph is None or len(ph["close"]) < 2:
@@ -124,14 +137,13 @@ def main():
                 trail_mult = strat_cfg["exit"]["trailing_atr_multiplier"]
                 atr_period = strat_cfg["exit"].get("atr_period", 14)
 
-                # 正式ATR計算（データ不足時は簡易推定にフォールバック）
                 atr_val = calc_atr(ph, atr_period)
                 if atr_val is None:
                     atr_val = abs(current - ph["close"][-2])
                     if atr_val == 0:
                         atr_val = 1
 
-                # トレーリング更新（v12.4: 加速TS）
+                # Accelerated trailing stop (v12.4)
                 if current > pos.entry_price:
                     profit_ratio = (current_high - pos.entry_price) / pos.entry_price
                     accel = max(0.7, 1.0 - profit_ratio * 2.0)
@@ -139,15 +151,15 @@ def main():
                     if new_trail > pos.trailing_stop:
                         pos.trailing_stop = new_trail
 
-                # 決���判定
+                # Exit check
                 if current <= pos.stop_loss or current >= pos.take_profit or current <= pos.trailing_stop:
                     order_mgr.exit(pos, current, "Exit triggered")
 
-            # シグナル判定
+            # Signal check
             if time.time() - last_signal_time >= live_cfg["interval"]["signal_check_sec"]:
                 last_signal_time = time.time()
                 if not is_entry_allowed():
-                    pass  # 11:00以降は新規エントリーしない
+                    pass  # No new entry after 11:00
                 else:
                     for ticker in live_cfg["watchlist"]:
                         if not order_mgr.can_entry(ticker): continue
@@ -155,8 +167,13 @@ def main():
                         prices = price_history[ticker]["close"]
                         if calc_signals(prices, strat_cfg) == "BUY":
                             current = prices[-1]
+
+                            # VWAP filter: skip BUY if price is below VWAP
+                            vwap = calc_vwap(price_history[ticker])
+                            if vwap is not None and current < vwap:
+                                continue
                             
-                            # 正式ATRベースのSL/TP計算
+                            # ATR-based SL/TP
                             atr_val = calc_atr(price_history[ticker], strat_cfg["exit"].get("atr_period", 14))
                             if atr_val is None:
                                 atr_val = max(current * 0.01, 1)
@@ -180,7 +197,7 @@ def main():
             time.sleep(live_cfg["interval"]["price_check_sec"])
 
     except KeyboardInterrupt:
-        print("停止しました")
+        print("Stopped.")
 
 if __name__ == "__main__":
     main()
