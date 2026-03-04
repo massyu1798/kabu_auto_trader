@@ -1,15 +1,15 @@
 """
-午後リバーサル戦略 バックテ���ト v1.0
-- 午前に動きすぎた銘柄のVWAP回帰を狙う逆張り戦略
+バックテスト: 午後リバーサル戦略
+- 午前中に動きすぎた銘柄のVWAP回帰を狙う
 - エントリー: 12:30〜14:00
-- エグジット: VWAP回帰 / SL / TS / 14:50強制決済
+- エグジット: VWAP回帰 / SL / 14:50強制決済
 """
 
 import pandas as pd
 import yfinance as yf
 import yaml
 import pandas_ta as ta
-from backtest.afternoon_engine import AfternoonBacktestEngine, BacktestResult
+from backtest.afternoon_engine import AfternoonBacktestEngine, BacktestResult, Side
 from backtest.screener import screen_stocks
 from strategy.afternoon_reversal import AfternoonReversalEngine
 
@@ -40,10 +40,10 @@ def load_intraday(ticker):
         return None
 
 
-def generate_afternoon_report(result: BacktestResult, initial_capital: float) -> str:
+def generate_report(result: BacktestResult, initial_capital: float) -> str:
     trades = result.trades
     if not trades:
-        return "\n⚠️ トレードが1件も発生しませんでした。条件が厳しすぎる可能性があります。"
+        return "\n⚠️ トレードが1件も発生しま��んでした。条件が厳しすぎる可能性があります。"
 
     total_trades = len(trades)
     wins = [t for t in trades if t.pnl > 0]
@@ -61,6 +61,7 @@ def generate_afternoon_report(result: BacktestResult, initial_capital: float) ->
     total_loss_amt = abs(sum(t.pnl for t in losses))
     profit_factor = (total_win_amt / total_loss_amt) if total_loss_amt != 0 else float("inf")
 
+    # 最大ドローダウン計算
     equity = result.equity_curve
     max_dd = 0
     if equity:
@@ -75,23 +76,14 @@ def generate_afternoon_report(result: BacktestResult, initial_capital: float) ->
     # Exit理由の集計
     exit_reasons = {}
     for t in trades:
-        reason_type = t.exit_reason.split(" ")[0]  # 最初の単語で分類
-        exit_reasons[reason_type] = exit_reasons.get(reason_type, 0) + 1
+        reason = t.exit_reason.split(" ")[0]  # 括弧前の部分
+        exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
 
-    exit_breakdown = "\n".join(
-        f"    {reason}: {count}回" for reason, count in sorted(exit_reasons.items(), key=lambda x: -x[1])
-    )
-
-    # LONG/SHORT 内訳
-    from backtest.afternoon_engine import Side
-    long_trades = [t for t in trades if t.side == Side.LONG]
-    short_trades = [t for t in trades if t.side == Side.SHORT]
-    long_wins = [t for t in long_trades if t.pnl > 0]
-    short_wins = [t for t in short_trades if t.pnl > 0]
+    exit_summary = "\n".join(f"    {reason}: {count}件" for reason, count in sorted(exit_reasons.items(), key=lambda x: -x[1]))
 
     report = f"""
 ============================================================
-    🔄 午後リバーサル バックテストレポート v1.0
+     午後リバーサル バックテストレポート
 ============================================================
 
 ■ 概要
@@ -108,19 +100,15 @@ def generate_afternoon_report(result: BacktestResult, initial_capital: float) ->
   平均損失:       {avg_loss:>+14,.0f} 円
   PF:             {profit_factor:.2f}
 
-■ LONG/SHORT 内訳
-  LONG:           {len(long_trades)}件 (勝ち{len(long_wins)})
-  SHORT:          {len(short_trades)}件 (勝ち{len(short_wins)})
-
-■ Exit理由
-{exit_breakdown}
+■ Exit理由内訳
+{exit_summary}
 """
     return report
 
 
 def main():
     print("=" * 60)
-    print("  🔄 午後リバーサル戦略 バックテスト v1.0")
+    print("  🔄 午後リバー���ル バックテスト")
     print("=" * 60)
 
     with open("config/afternoon_config.yaml", "r", encoding="utf-8") as f:
@@ -129,9 +117,8 @@ def main():
     print("\n■ 銘柄スクリーニング...")
     selected = screen_stocks(config)
     tickers = [s["ticker"] for s in selected]
-    print(f"  → {len(tickers)}銘柄を選定")
 
-    print(f"\n■ 解���中（午後リバーサルシグナル生成）...")
+    print(f"\n■ 解析中（午後リバーサルシグナル生成）...")
     reversal_engine = AfternoonReversalEngine("config/afternoon_config.yaml")
     signals_dict = {}
 
@@ -144,13 +131,11 @@ def main():
         signals_dict[ticker] = signals_df
         print(".", end="", flush=True)
 
-    print(f"\n  → {len(signals_dict)}銘柄のシグナル生成完了")
-
-    print("\n■ バックテスト実行...")
+    print(f"\n\n■ バックテスト実行（{len(signals_dict)}銘柄）...")
     engine = AfternoonBacktestEngine("config/afternoon_config.yaml")
     result = engine.run(signals_dict)
 
-    print(generate_afternoon_report(result, engine.initial_capital))
+    print(generate_report(result, engine.initial_capital))
     print("\n✅ 完了")
 
 
