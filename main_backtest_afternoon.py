@@ -36,14 +36,14 @@ def load_intraday(ticker):
         ]
         return data
     except Exception as e:
-        print(f"  ❌ {ticker} 取得エラー: {e}")
+        print(f"  x {ticker} 取得エラー: {e}")
         return None
 
 
 def generate_report(result: BacktestResult, initial_capital: float) -> str:
     trades = result.trades
     if not trades:
-        return "\n⚠️ トレードが1件も発生しま��んでした。条件が厳しすぎる可能性があります。"
+        return "\n(!) トレードが1件も発生しませんでした。条件が厳しすぎる可能性があります。"
 
     total_trades = len(trades)
     wins = [t for t in trades if t.pnl > 0]
@@ -73,13 +73,19 @@ def generate_report(result: BacktestResult, initial_capital: float) -> str:
             if dd > max_dd:
                 max_dd = dd
 
-    # Exit理由の集計
+    # Exit���由の集計
     exit_reasons = {}
     for t in trades:
-        reason = t.exit_reason.split(" ")[0]  # 括弧前の部分
+        reason = t.exit_reason.split(" ")[0]
         exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
 
     exit_summary = "\n".join(f"    {reason}: {count}件" for reason, count in sorted(exit_reasons.items(), key=lambda x: -x[1]))
+
+    # LONG/SHORT 内訳
+    long_trades = [t for t in trades if t.side == Side.LONG]
+    short_trades = [t for t in trades if t.side == Side.SHORT]
+    long_wins = [t for t in long_trades if t.pnl > 0]
+    short_wins = [t for t in short_trades if t.pnl > 0]
 
     report = f"""
 ============================================================
@@ -100,6 +106,10 @@ def generate_report(result: BacktestResult, initial_capital: float) -> str:
   平均損失:       {avg_loss:>+14,.0f} 円
   PF:             {profit_factor:.2f}
 
+■ LONG/SHORT 内訳
+  LONG:           {len(long_trades)}件 (勝ち{len(long_wins)})
+  SHORT:          {len(short_trades)}件 (勝ち{len(short_wins)})
+
 ■ Exit理由内訳
 {exit_summary}
 """
@@ -108,7 +118,7 @@ def generate_report(result: BacktestResult, initial_capital: float) -> str:
 
 def main():
     print("=" * 60)
-    print("  🔄 午後リバー���ル バックテスト")
+    print("  午後リバーサル バックテスト")
     print("=" * 60)
 
     with open("config/afternoon_config.yaml", "r", encoding="utf-8") as f:
@@ -136,7 +146,7 @@ def main():
     result = engine.run(signals_dict)
 
     print(generate_report(result, engine.initial_capital))
-    print("\n✅ 完了")
+    print("\n完了")
 
 
 if __name__ == "__main__":
