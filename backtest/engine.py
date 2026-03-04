@@ -1,4 +1,4 @@
-"""バックテストエンジン v12P"""
+"""バックテストエンジン v12.4: 加速TS + 12:00エントリー制限"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -64,8 +64,6 @@ class BacktestEngine:
         e = self.config["exit"]
         self.sl_atr_mult = e["stop_loss_atr_multiplier"]
         self.tp_rr_ratio = e["take_profit_rr_ratio"]
-        # 修正前： self.atr_period = e["atr_period"]
-        # 修正後： .get() を使って、設定がなければ14をデフォルトにする
         self.atr_period = e.get("atr_period", 14)
         self.trailing_enabled = e.get("trailing_stop", False)
         self.trailing_atr_mult = e.get("trailing_atr_multiplier", 2.0)
@@ -90,6 +88,7 @@ class BacktestEngine:
         return timestamp.hour >= 14 and timestamp.minute >= 30
 
     def _is_morning_session(self, timestamp):
+        """v12.4: 9:00〜12:00のみエントリー許可"""
         if not hasattr(timestamp, "hour"):
             return True
         t = timestamp.hour * 100 + timestamp.minute
@@ -186,15 +185,14 @@ class BacktestEngine:
                 low = row["low"]
                 exit_reason = None
 
-                # トレーリングストップ更新
+                # トレーリングストップ更新（v12.4: 加速TS）
                 if self.trailing_enabled:
                     atr_col = f"ATRr_{self.atr_period}"
                     atr_val = df[atr_col].loc[date]
                     if not pd.isna(atr_val):
-                        # ★ v12.4: 含み益が大きいほどTSを締める（加速TS）
                         if pos.side == Side.LONG:
                             profit_ratio = (high - pos.entry_price) / pos.entry_price
-                            accel = max(0.6, 1.0 - profit_ratio * 2.0)
+                            accel = max(0.7, 1.0 - profit_ratio * 2.0)
                             new_trail = high - atr_val * self.trailing_atr_mult * accel
                             if new_trail > pos.trailing_stop:
                                 pos.trailing_stop = new_trail
@@ -206,7 +204,7 @@ class BacktestEngine:
                                 pos.trailing_stop = new_trail
 
                 if is_daytrade and is_close_time:
-                    exit_reason = "引け強制決済"
+                    exit_reason = "引け強制決���"
                 elif pos.side == Side.LONG and current_price <= pos.stop_loss:
                     exit_reason = f"損切り ({pos.stop_loss:.0f})"
                 elif pos.side == Side.SHORT and current_price >= pos.stop_loss:
@@ -247,7 +245,7 @@ class BacktestEngine:
             if (
                 not is_close_time
                 and not is_cutoff
-                and self._is_morning_session(date)    # ★ v12.5 追加
+                and self._is_morning_session(date)
                 and abs(daily_loss) < self.initial_capital * self.max_daily_loss
             ):
                 for ticker, df in signals_dict.items():
@@ -320,7 +318,7 @@ class BacktestEngine:
                     )
                     positions.append(pos)
 
-            # === 3. 資産評価 ===
+            # === 3. ��産評価 ===
             unrealized = 0
             for pos in positions:
                 if pos.ticker in signals_dict and date in signals_dict[pos.ticker].index:
