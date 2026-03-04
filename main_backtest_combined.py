@@ -71,13 +71,28 @@ def calc_daily_bias(daily_df, config):
     return bias
 
 
+def _is_morning_session(timestamp):
+    """午前v12.4: 12:00までのシグナルのみ有効にするフィルター"""
+    if not hasattr(timestamp, "hour"):
+        return True
+    t = timestamp.hour * 100 + timestamp.minute
+    return 900 <= t <= 1200
+
+
 def apply_v11_filter(signals_df, daily_bias):
     result = signals_df.copy()
     for idx in result.index:
         date = idx.date() if hasattr(idx, "date") else idx
+        
+        # 1. 日足バイアスフィルター
         b = daily_bias.get(date, "NEUTRAL")
         if b == "BEAR":
             result.loc[idx, "final_signal"] = "HOLD"
+            
+        # 2. 時間帯フィルター（12:00以降は新規エントリーしない）
+        if not _is_morning_session(idx):
+            result.loc[idx, "final_signal"] = "HOLD"
+            
     return result
 
 
@@ -195,7 +210,7 @@ def main():
     morning_pnl = sum(t.pnl for t in morning_result.trades)
     afternoon_pnl = sum(t.pnl for t in afternoon_result.trades)
 
-    # 合算DD（簡易: 各セッ��ョンの最大DDの大きい方）
+    # 合算DD（簡易: 各セッョンの最大DDの大きい方）
     def calc_dd(equity_curve):
         if not equity_curve:
             return 0
@@ -223,12 +238,12 @@ def main():
   最終資産:       {equity_final:>14,.0f} 円
   純損益:         {total_pnl:>+14,.0f} 円 ({total_return:+.2f}%)
   総トレード数:   {len(all_trades)}
-    午前:         {len(morning_result.trades)}��� -> {morning_pnl:>+,.0f} 円
+    午前:         {len(morning_result.trades)}件 -> {morning_pnl:>+,.0f} 円
     午後:         {len(afternoon_result.trades)}件 -> {afternoon_pnl:>+,.0f} 円
 
-■ セッション別詳��
+■ セッション別詳細
 {format_report_section("午前 v12.4 モーニング・モメンタム", morning_result.trades, initial_capital, morning_result.equity_curve)}
-{format_report_section("午後 v1.2 アフ���ヌーン・リバーサル", afternoon_result.trades, initial_capital, afternoon_result.equity_curve)}
+{format_report_section("午後 v1.2 アフタヌーン・リバーサル", afternoon_result.trades, initial_capital, afternoon_result.equity_curve)}
 """
     print(report)
     print("完了")
