@@ -1,5 +1,5 @@
 """
-日本株自動売買Bot（エラー修正・堅牢版）
+日本株自動売買Bot v12.4（加速TS + 正式ATR + 12:00エントリー制限）
 """
 
 import time
@@ -9,7 +9,7 @@ import pandas_ta as ta
 from datetime import datetime
 from core.auth import KabuAuth
 from core.api_client import KabuClient
-from core.order_manager import OrderManager, LivePosition # 明示的インポート
+from core.order_manager import OrderManager, LivePosition
 
 def load_config():
     with open("config/live_config.yaml", "r", encoding="utf-8") as f:
@@ -24,14 +24,27 @@ def is_market_open() -> bool:
     t = now.hour * 100 + now.minute
     return 900 <= t <= 1525
 
-# ★ v12.4 追加: エントリー可能時間帯（9:00〜10:00のみ）
 def is_entry_allowed() -> bool:
+    """v12.4: 9:00〜12:00のみ新規エントリー許可"""
     now = datetime.now()
     t = now.hour * 100 + now.minute
-    return 900 <= t <= 1000
+    return 900 <= t <= 1200
+
+def calc_atr(price_hist: dict, period: int = 14) -> float | None:
+    """price_historyからpandas_taで正式なATRを計算"""
+    h = price_hist["high"]
+    l = price_hist["low"]
+    c = price_hist["close"]
+    if len(c) < period + 1:
+        return None
+    df = pd.DataFrame({"high": h, "low": l, "close": c})
+    atr_series = ta.atr(df["high"], df["low"], df["close"], length=period)
+    if atr_series is None or pd.isna(atr_series.iloc[-1]):
+        return None
+    return float(atr_series.iloc[-1])
 
 def calc_signals(prices: list[float], strategy_config: dict) -> str:
-    if len(prices) < 30: return "HOLD" # 最低30本必要
+    if len(prices) < 30: return "HOLD"
     
     df = pd.DataFrame({"close": prices})
     
@@ -72,10 +85,10 @@ def main():
     client = KabuClient(live_cfg["api"]["base_url"], auth)
     order_mgr = OrderManager(client, live_cfg)
 
-    price_history = {ticker: [] for ticker in live_cfg["watchlist"]}
+    price_history = {ticker: {"high": [], "low": [], "close": []} for ticker in live_cfg["watchlist"]}
     last_signal_time = 0
     
-    print("Bot稼働中...")
+    print("Bot稼働中... (v12.4 加速TS + 正式ATR)")
 
     try:
         while True:
@@ -86,27 +99,43 @@ def main():
             for ticker in live_cfg["watchlist"]:
                 board = client.get_board(ticker)
                 if board and board.get("CurrentPrice"):
-                    price_history[ticker].append(float(board["CurrentPrice"]))
-                    if len(price_history[ticker]) > 500:
-                        price_history[ticker] = price_history[ticker][-500:]
-                time.sleep(1)   # ★ 追加：1銘柄ごとに1秒待つ
+                    current_price = float(board["CurrentPrice"])
+                    high_price = float(board.get("HighPrice", current_price))
+                    low_price = float(board.get("LowPrice", current_price))
+
+                    ph = price_history[ticker]
+                    ph["close"].append(current_price)
+                    ph["high"].append(high_price)
+                    ph["low"].append(low_price)
+
+                    # 最大500件に制限
+                    for key in ("high", "low", "close"):
+                        if len(ph[key]) > 500:
+                            ph[key] = ph[key][-500:]
+                time.sleep(1)   # 1銘柄ごとに1秒待つ
 
             # ポジション管理
             for pos in list(order_mgr.positions):
-                prices = price_history.get(pos.ticker, [])
-                if len(prices) < 2: continue
-                current = prices[-1]
-                
+                ph = price_history.get(pos.ticker)
+                if ph is None or len(ph["close"]) < 2:
+                    continue
+                current = ph["close"][-1]
+                current_high = ph["high"][-1]
+                trail_mult = strat_cfg["exit"]["trailing_atr_multiplier"]
+                atr_period = strat_cfg["exit"].get("atr_period", 14)
+
+                # 正式ATR計算（データ不足時は簡易推定にフォールバック）
+                atr_val = calc_atr(ph, atr_period)
+                if atr_val is None:
+                    atr_val = abs(current - ph["close"][-2])
+                    if atr_val == 0:
+                        atr_val = 1
+
                 # トレーリング更新（v12.4: 加速TS）
                 if current > pos.entry_price:
-                    atr_est = abs(current - prices[-2]) if len(prices) >= 2 else 1
-                    trail_mult = strat_cfg["exit"]["trailing_atr_multiplier"]
-
-                    # 加速係数: 含み益が大きいほどTSを締める
-                    profit_ratio = (current - pos.entry_price) / pos.entry_price
+                    profit_ratio = (current_high - pos.entry_price) / pos.entry_price
                     accel = max(0.7, 1.0 - profit_ratio * 2.0)
-
-                    new_trail = current - (atr_est * trail_mult * accel)
+                    new_trail = current_high - (atr_val * trail_mult * accel)
                     if new_trail > pos.trailing_stop:
                         pos.trailing_stop = new_trail
 
@@ -117,20 +146,36 @@ def main():
             # シグナル判定
             if time.time() - last_signal_time >= live_cfg["interval"]["signal_check_sec"]:
                 last_signal_time = time.time()
-                if not is_entry_allowed():         # ★ 追加: 10:00以降は新規エントリーしない
-                    continue                       # ★ 追加
-                for ticker in live_cfg["watchlist"]:
-                    if not order_mgr.can_entry(ticker): continue
-                    
-                    prices = price_history[ticker]
-                    if calc_signals(prices, strat_cfg) == "BUY":
-                        current = prices[-1]
-                        # 安全な株数計算
-                        sl_dist = max(current * 0.01, 1) # 最低1円
-                        size = int((live_cfg["trade"]["initial_capital"] * 0.005) / sl_dist)
-                        size = max((size // 100) * 100, 100)
+                if not is_entry_allowed():
+                    pass  # 12:00以降は新規エントリーしない
+                else:
+                    for ticker in live_cfg["watchlist"]:
+                        if not order_mgr.can_entry(ticker): continue
                         
-                        order_mgr.entry(ticker, "BUY", current, size, current-sl_dist, current+sl_dist*2)
+                        prices = price_history[ticker]["close"]
+                        if calc_signals(prices, strat_cfg) == "BUY":
+                            current = prices[-1]
+                            
+                            # 正式ATRベースのSL/TP計算
+                            atr_val = calc_atr(price_history[ticker], strat_cfg["exit"].get("atr_period", 14))
+                            if atr_val is None:
+                                atr_val = max(current * 0.01, 1)
+
+                            sl_mult = strat_cfg["exit"]["stop_loss_atr_multiplier"]
+                            tp_rr = strat_cfg["exit"]["take_profit_rr_ratio"]
+                            risk_per = live_cfg["trade"]["risk_per_trade"]
+
+                            sl_dist = atr_val * sl_mult
+                            sl_dist = max(sl_dist, 1)
+
+                            size = int((live_cfg["trade"]["initial_capital"] * risk_per) / sl_dist)
+                            size = max((size // 100) * 100, 100)
+
+                            entry_price = current
+                            stop_loss = entry_price - sl_dist
+                            take_profit = entry_price + sl_dist * tp_rr
+                            
+                            order_mgr.entry(ticker, "BUY", entry_price, size, stop_loss, take_profit)
 
             time.sleep(live_cfg["interval"]["price_check_sec"])
 
