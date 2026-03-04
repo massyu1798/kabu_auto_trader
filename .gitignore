@@ -1,4 +1,5 @@
 # === APIキー・パスワード等の機密情報 ===
+config/live_config.yaml
 config/live_config.json
 config/*secret*
 *.env
@@ -26,4 +27,3 @@ logs/
 Thumbs.db
 .vscode/
 *.swp
-*.swoconfig/live_config.yaml 
