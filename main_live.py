@@ -1,5 +1,5 @@
 """
-日本株自動売買Bot v12.4（加速TS + 正式ATR + 12:00エントリー制限）
+日本株自動売買Bot v12.4（加速TS + 正式ATR + 11:00エントリー制��）
 """
 
 import time
@@ -25,13 +25,13 @@ def is_market_open() -> bool:
     return 900 <= t <= 1525
 
 def is_entry_allowed() -> bool:
-    """v12.4: 9:00〜12:00のみ新規エントリー許可"""
+    """v12.4: 9:05〜11:00のみ新規エントリー許可"""
     now = datetime.now()
     t = now.hour * 100 + now.minute
-    return 900 <= t <= 1200
+    return 905 <= t <= 1100
 
 def calc_atr(price_hist: dict, period: int = 14) -> float | None:
-    """price_historyからpandas_taで正式なATRを計算"""
+    """price_historyからpandas_taで正式なATRを��算"""
     h = price_hist["high"]
     l = price_hist["low"]
     c = price_hist["close"]
@@ -139,7 +139,7 @@ def main():
                     if new_trail > pos.trailing_stop:
                         pos.trailing_stop = new_trail
 
-                # 決済判定
+                # 決���判定
                 if current <= pos.stop_loss or current >= pos.take_profit or current <= pos.trailing_stop:
                     order_mgr.exit(pos, current, "Exit triggered")
 
@@ -147,7 +147,7 @@ def main():
             if time.time() - last_signal_time >= live_cfg["interval"]["signal_check_sec"]:
                 last_signal_time = time.time()
                 if not is_entry_allowed():
-                    pass  # 12:00以降は新規エントリーしない
+                    pass  # 11:00以降は新規エントリーしない
                 else:
                     for ticker in live_cfg["watchlist"]:
                         if not order_mgr.can_entry(ticker): continue
