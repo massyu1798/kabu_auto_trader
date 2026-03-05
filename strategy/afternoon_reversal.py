@@ -1,8 +1,8 @@
 """
-午後リバーサル戦略エンジン
+午後リバーサル戦略エンジン + v13 live wrapper
 - 午前中に動きすぎた銘柄のVWAP回帰を狙う
-- エントリー: 12:30〜14:00
-- RSI + ボリンジャーバンド + 午前変動率���ィルター
+- エン��リー: 12:30〜14:00
+- RSI + ボリンジャーバンド + 午前変動率フィルター
 """
 
 import pandas as pd
@@ -49,7 +49,7 @@ class AfternoonReversalEngine:
             open_price = group["open"].iloc[0]
             if open_price == 0:
                 continue
-            # 各時点での寄りからの変動率
+            # 各時��での寄りからの変動率
             move_pct = ((group["close"] - open_price) / open_price) * 100
             morning_move.loc[group.index] = move_pct
 
@@ -62,7 +62,7 @@ class AfternoonReversalEngine:
         return self.entry_start <= t <= self.entry_end
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        """午���リバーサルシグナル��生成"""
+        """午後リバーサルシグナルを生成"""
         result = df.copy()
 
         # インジケーター算出
@@ -118,17 +118,47 @@ class AfternoonReversalEngine:
                 morning_move <= -self.min_morning_move_pct     # 午前中に大きく下落
                 and rsi <= self.rsi_oversold                    # RSI売られすぎ
                 and close <= bb_lower                           # BB下限以下
-                and close < vwap                                # VWAPより下（割安）
+                and close < vwap                                # VWAP���り下（割安）
             ):
                 result.loc[idx, "afternoon_signal"] = "BUY"
 
             # === 売りシグナル（買われすぎからの反落） ===
             elif (
-                morning_move >= self.min_morning_move_pct      # 午前中に大きく上昇
+                morning_move >= self.min_morning_move_pct      # 午前��に大きく上昇
                 and rsi >= self.rsi_overbought                  # RSI買われすぎ
                 and close >= bb_upper                           # BB上限以上
-                and close > vwap                                # VWAPより上（割��）
+                and close > vwap                                # VWAPより上（割高）
             ):
                 result.loc[idx, "afternoon_signal"] = "SELL"
 
         return result
+
+    # ================================================
+    # v13: Live wrapper - evaluate last bar only
+    # ================================================
+    def evaluate_live(self, df: pd.DataFrame) -> tuple[str, dict]:
+        """
+        Evaluate afternoon reversal on a DataFrame of 5min bars
+        and return the signal for the LAST bar.
+
+        Returns:
+            (signal, info_dict)
+            signal: "BUY" / "SELL" / "HOLD"
+            info: dict with rsi, bb_lower, bb_upper, vwap, morning_move etc.
+        """
+        if df.empty or len(df) < 3:
+            return ("HOLD", {"reason": "insufficient bars"})
+
+        result = self.generate_signals(df)
+        last = result.iloc[-1]
+        signal = last.get("afternoon_signal", "HOLD")
+
+        info = {
+            "rsi": float(last["rsi"]) if not pd.isna(last.get("rsi")) else None,
+            "bb_lower": float(last["bb_lower"]) if not pd.isna(last.get("bb_lower")) else None,
+            "bb_upper": float(last["bb_upper"]) if not pd.isna(last.get("bb_upper")) else None,
+            "vwap": float(last["vwap"]) if not pd.isna(last.get("vwap")) else None,
+            "morning_move": float(last["morning_move"]) if not pd.isna(last.get("morning_move")) else None,
+        }
+
+        return (signal, info)

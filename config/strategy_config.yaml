@@ -1,9 +1,9 @@
 # ============================================
-# Strategy Config (v12.4: Morning Momentum - Restored)
+# Strategy Config (v13: Morning Momentum + SELL enabled)
 # ============================================
 
 global:
-  initial_capital: 3000000
+  initial_capital: 7000000
   max_positions: 5
   risk_per_trade: 0.008
   max_daily_loss: 0.03
@@ -59,19 +59,19 @@ strategies:
 
 ensemble:
   buy_threshold: 1.2
-  sell_threshold: -99.0           # Restored from -2.5 (disable short)
+  sell_threshold: -1.2            # v13: SELL enabled (was -99.0)
 
 exit:
   atr_period: 14
-  stop_loss_atr_multiplier: 1.5   # Restored from 2.5 (tight SL)
-  take_profit_rr_ratio: 3.0       # Restored from 2.5 (extend profit)
+  stop_loss_atr_multiplier: 1.5   # Tight SL
+  take_profit_rr_ratio: 3.0       # Extend profit
   trailing_stop: true
   trailing_atr_multiplier: 2.0
 
 cooldown:
   enabled: true
-  bars_after_loss: 15             # Restored from 12
-  bars_after_win: 5               # Restored from 3
+  bars_after_loss: 15
+  bars_after_win: 5
 
 trend_filter:
   enabled: true
