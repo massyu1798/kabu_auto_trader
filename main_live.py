@@ -1,5 +1,5 @@
 """
-JP Stock Auto Trading Bot v12.4 (Accel TS + ATR + VWAP Filter)
+JP Stock Auto Trading Bot v12.4 (Accel TS + ATR + VWAP Filter + Debug Log)
 """
 
 import time
@@ -50,16 +50,15 @@ def calc_vwap(price_hist: dict) -> float | None:
     c = price_hist["close"]
     if len(c) < 5:
         return None
-    # Typical Price = (High + Low + Close) / 3
-    # Without real volume, use cumulative typical price average
     tp_sum = 0.0
     for i in range(len(c)):
         tp = (h[i] + l[i] + c[i]) / 3.0
         tp_sum += tp
     return tp_sum / len(c)
 
-def calc_signals(prices: list[float], strategy_config: dict) -> str:
-    if len(prices) < 30: return "HOLD"
+def calc_signals_with_score(prices: list[float], strategy_config: dict) -> tuple[str, float]:
+    """Return (signal, score) for debug logging"""
+    if len(prices) < 30: return ("HOLD", -999.0)
     
     df = pd.DataFrame({"close": prices})
     
@@ -68,7 +67,7 @@ def calc_signals(prices: list[float], strategy_config: dict) -> str:
     ema_s = ta.ema(df["close"], length=tf["ema_short"])
     ema_l = ta.ema(df["close"], length=tf["ema_long"])
     
-    if ema_s is None or ema_l is None: return "HOLD"
+    if ema_s is None or ema_l is None: return ("HOLD", -999.0)
     
     score = 0.0
     last = len(df) - 1
@@ -89,8 +88,8 @@ def calc_signals(prices: list[float], strategy_config: dict) -> str:
             score += 1.0
             
     if score >= strategy_config["ensemble"]["buy_threshold"]:
-        return "BUY"
-    return "HOLD"
+        return ("BUY", score)
+    return ("HOLD", score)
 
 def main():
     live_cfg, strat_cfg = load_config()
@@ -100,8 +99,13 @@ def main():
 
     price_history = {ticker: {"high": [], "low": [], "close": []} for ticker in live_cfg["watchlist"]}
     last_signal_time = 0
+    signal_check_count = 0
     
-    print("Bot running... (v12.4 Accel TS + ATR + VWAP Filter)")
+    print("Bot running... (v12.4 Accel TS + ATR + VWAP Filter + Debug)")
+    print(f"  Watchlist: {live_cfg['watchlist']}")
+    print(f"  Buy threshold: {strat_cfg['ensemble']['buy_threshold']}")
+    print(f"  Entry window: 9:05 - 11:00")
+    print(f"  SL: {strat_cfg['exit']['stop_loss_atr_multiplier']} ATR / TP: {strat_cfg['exit']['take_profit_rr_ratio']} R:R")
 
     try:
         while True:
@@ -121,7 +125,6 @@ def main():
                     ph["high"].append(high_price)
                     ph["low"].append(low_price)
 
-                    # Limit to 500 entries
                     for key in ("high", "low", "close"):
                         if len(ph[key]) > 500:
                             ph[key] = ph[key][-500:]
@@ -158,19 +161,41 @@ def main():
             # Signal check
             if time.time() - last_signal_time >= live_cfg["interval"]["signal_check_sec"]:
                 last_signal_time = time.time()
+                now = datetime.now()
+                now_str = now.strftime("%H:%M:%S")
+                signal_check_count += 1
+
                 if not is_entry_allowed():
-                    pass  # No new entry after 11:00
+                    if signal_check_count % 10 == 1:
+                        print(f"  [{now_str}] Entry window closed (9:05-11:00). Positions: {len(order_mgr.positions)}")
                 else:
+                    # Log data status every 5 checks
+                    if signal_check_count % 5 == 1:
+                        print(f"\n  [{now_str}] === Signal Check #{signal_check_count} ===")
+                        for ticker in live_cfg["watchlist"]:
+                            data_len = len(price_history[ticker]["close"])
+                            last_price = price_history[ticker]["close"][-1] if data_len > 0 else 0
+                            vwap = calc_vwap(price_history[ticker])
+                            vwap_str = f"{vwap:.1f}" if vwap else "N/A"
+                            print(f"    {ticker}: price={last_price:.0f} vwap={vwap_str} data={data_len}/30")
+
                     for ticker in live_cfg["watchlist"]:
                         if not order_mgr.can_entry(ticker): continue
                         
                         prices = price_history[ticker]["close"]
-                        if calc_signals(prices, strat_cfg) == "BUY":
+                        signal, score = calc_signals_with_score(prices, strat_cfg)
+
+                        # Log BUY signals and near-BUY scores
+                        if score > 0:
+                            print(f"  [{now_str}] {ticker}: score={score:.1f} signal={signal} (threshold={strat_cfg['ensemble']['buy_threshold']})")
+
+                        if signal == "BUY":
                             current = prices[-1]
 
-                            # VWAP filter: skip BUY if price is below VWAP
+                            # VWAP filter
                             vwap = calc_vwap(price_history[ticker])
                             if vwap is not None and current < vwap:
+                                print(f"  [{now_str}] {ticker}: BUY blocked by VWAP filter (price={current:.0f} < vwap={vwap:.0f})")
                                 continue
                             
                             # ATR-based SL/TP
@@ -191,13 +216,16 @@ def main():
                             entry_price = current
                             stop_loss = entry_price - sl_dist
                             take_profit = entry_price + sl_dist * tp_rr
-                            
+
+                            print(f"  [{now_str}] >>> ENTRY {ticker}: price={entry_price:.0f} SL={stop_loss:.0f} TP={take_profit:.0f} size={size} ATR={atr_val:.1f}")
                             order_mgr.entry(ticker, "BUY", entry_price, size, stop_loss, take_profit)
 
             time.sleep(live_cfg["interval"]["price_check_sec"])
 
     except KeyboardInterrupt:
-        print("Stopped.")
+        print("\nStopped.")
+        print(f"  Total signal checks: {signal_check_count}")
+        print(f"  Open positions: {len(order_mgr.positions)}")
 
 if __name__ == "__main__":
     main()
