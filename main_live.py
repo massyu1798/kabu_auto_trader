@@ -11,8 +11,8 @@ from core.auth import KabuAuth
 from core.api_client import KabuClient
 from core.order_manager import OrderManager, LivePosition
 
-# Minimum data points for signal calculation (reduced for faster startup)
-MIN_DATA_POINTS = 10
+# Minimum data points for signal calculation
+MIN_DATA_POINTS = 30
 
 def load_config():
     with open("config/live_config.yaml", "r", encoding="utf-8") as f:
