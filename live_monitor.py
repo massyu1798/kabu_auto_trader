@@ -25,6 +25,11 @@ def main():
             print(f"\n--- 取得時刻: {time.strftime('%H:%M:%S')} ---")
             for ticker in watchlist:
                 board = client.get_board(ticker)
+                if board is None:
+                    print("board is None (likely auth failed or API error)")
+                else:
+                    print("BOARD KEYS:", list(board.keys()))
+
                 if board:
                     name = board.get("SymbolName", "不明")
                     price = board.get("CurrentPrice", "取得失敗")

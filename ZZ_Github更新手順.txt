@@ -1,0 +1,6 @@
+今後コードを更新したら
+
+git add .
+git commit -m "変更内容のメモ"
+git push
+この3行だけでGitHubに反映できます。お疲れさまでした！

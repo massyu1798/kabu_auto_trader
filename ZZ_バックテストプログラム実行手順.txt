@@ -1,0 +1,13 @@
+cd C:\kabu_auto_trader
+
+venv\Scripts\activate
+
+実行コード
+V12
+python main_backtest.py
+
+午後リバーサル
+python main_backtest_afternoon.py
+
+合体版
+python main_backtest_combined.py
