@@ -11,6 +11,9 @@ from core.auth import KabuAuth
 from core.api_client import KabuClient
 from core.order_manager import OrderManager, LivePosition
 
+# Minimum data points for signal calculation (reduced for faster startup)
+MIN_DATA_POINTS = 10
+
 def load_config():
     with open("config/live_config.yaml", "r", encoding="utf-8") as f:
         live = yaml.safe_load(f)
@@ -58,14 +61,19 @@ def calc_vwap(price_hist: dict) -> float | None:
 
 def calc_signals_with_score(prices: list[float], strategy_config: dict) -> tuple[str, float]:
     """Return (signal, score) for debug logging"""
-    if len(prices) < 30: return ("HOLD", -999.0)
+    if len(prices) < MIN_DATA_POINTS: return ("HOLD", -999.0)
     
     df = pd.DataFrame({"close": prices})
     
     # Trend follow
     tf = strategy_config["strategies"]["trend_follow"]["params"]
-    ema_s = ta.ema(df["close"], length=tf["ema_short"])
-    ema_l = ta.ema(df["close"], length=tf["ema_long"])
+    ema_short_len = min(tf["ema_short"], len(prices) - 1)
+    ema_long_len = min(tf["ema_long"], len(prices) - 1)
+    if ema_short_len < 3 or ema_long_len < 3:
+        return ("HOLD", -999.0)
+
+    ema_s = ta.ema(df["close"], length=ema_short_len)
+    ema_l = ta.ema(df["close"], length=ema_long_len)
     
     if ema_s is None or ema_l is None: return ("HOLD", -999.0)
     
@@ -81,8 +89,8 @@ def calc_signals_with_score(prices: list[float], strategy_config: dict) -> tuple
 
     # Breakout
     bo = strategy_config["strategies"]["breakout"]["params"]
-    period = bo["channel_period"]
-    if last >= period:
+    period = min(bo["channel_period"], len(prices) - 1)
+    if period >= 3 and last >= period:
         high_max = df["close"].iloc[last-period:last].max()
         if df["close"].iloc[last] > high_max:
             score += 1.0
@@ -106,6 +114,7 @@ def main():
     print(f"  Buy threshold: {strat_cfg['ensemble']['buy_threshold']}")
     print(f"  Entry window: 9:05 - 11:00")
     print(f"  SL: {strat_cfg['exit']['stop_loss_atr_multiplier']} ATR / TP: {strat_cfg['exit']['take_profit_rr_ratio']} R:R")
+    print(f"  Min data points for signal: {MIN_DATA_POINTS}")
 
     try:
         while True:
@@ -177,7 +186,8 @@ def main():
                             last_price = price_history[ticker]["close"][-1] if data_len > 0 else 0
                             vwap = calc_vwap(price_history[ticker])
                             vwap_str = f"{vwap:.1f}" if vwap else "N/A"
-                            print(f"    {ticker}: price={last_price:.0f} vwap={vwap_str} data={data_len}/30")
+                            ready = "OK" if data_len >= MIN_DATA_POINTS else "waiting"
+                            print(f"    {ticker}: price={last_price:.0f} vwap={vwap_str} data={data_len}/{MIN_DATA_POINTS} [{ready}]")
 
                     for ticker in live_cfg["watchlist"]:
                         if not order_mgr.can_entry(ticker): continue
