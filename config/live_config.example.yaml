@@ -1,34 +1,34 @@
 # ============================================
-# 本番設定（v12ベース）- テンプレート
+# 本番設定（v13）- テンプレート
 # ============================================
 
 api:
   base_url: "ここにAPIのURLを入れる"
   password: "ここにパスワードを入れる"
-  timeout: 5
+  timeout_sec: 10                 # v13: /board timeout対策（推奨10秒）
 
 mode:
   paper_trade: false
   log_to_file: true
 
 trade:
-  initial_capital: 3000000
+  initial_capital: 7000000        # v13: 300万→700万
   max_positions: 4
   risk_per_trade: 0.007
   max_daily_loss: 0.04
   margin_type: "day_trade"
 
 watchlist:
-  - "9984"  # ソフトバンクG
+  - "9984"  # ���フトバンクG
   - "8035"  # 東京エレク
   - "6857"  # アドバンテスト
   - "6098"  # リクルート
   - "6762"  # TDK
   - "6981"  # 村田製作
-  - "7203"  # トヨタ
+  - "7203"  # トヨ��
   - "6758"  # ソニー
-  - "6501"  # 日立
-  - "8306"  #   菱UFJ
+  - "6501"  # ��立
+  - "8306"  # 三菱UFJ
 
 interval:
   price_check_sec: 30
