@@ -1,4 +1,4 @@
-"""統合スコアリングエンジン v6: 出来高分析追加"""
+"""��合スコアリングエンジン v6: 出来高分析追加 + v13 live wrapper"""
 
 import pandas as pd
 import yaml
@@ -65,3 +65,37 @@ class EnsembleEngine:
         ] = "SELL"
 
         return result
+
+    # ================================================
+    # v13: Live wrapper - evaluate last bar only
+    # ================================================
+    def evaluate_live(self, df: pd.DataFrame) -> tuple[str, float, str]:
+        """
+        Evaluate ensemble on a DataFrame of 5min bars and return
+        the signal for the LAST bar only.
+
+        Returns:
+            (signal, score, detail_str)
+            signal: "BUY" / "SELL" / "HOLD"
+            score:  ensemble_score of last bar
+            detail: human-readable breakdown
+        """
+        if df.empty or len(df) < 3:
+            return ("HOLD", 0.0, "insufficient bars")
+
+        result = self.generate_ensemble_signals(df)
+        last = result.iloc[-1]
+        signal = last["final_signal"]
+        score = float(last["ensemble_score"])
+
+        # Build detail string
+        parts = []
+        for strategy, weight in self.strategies:
+            col = f"{strategy.name}_score"
+            if col in result.columns:
+                s = float(last[col])
+                if s != 0:
+                    parts.append(f"{strategy.name}={s:.1f}*{weight}")
+        detail = " + ".join(parts) if parts else "no hits"
+
+        return (signal, score, detail)
