@@ -1,10 +1,11 @@
 # ============================================
 # 午後リバーサル戦略パラメータ v1.2
 # v1.0ベース + SLタイト化 + TP近接化
+# v13: initial_capital 700万
 # ============================================
 
 global:
-  initial_capital: 3000000
+  initial_capital: 7000000
   max_positions: 3
   risk_per_trade: 0.006
   max_daily_loss: 0.02
@@ -27,7 +28,7 @@ afternoon_reversal:
   # 午前変動率フィルター
   min_morning_move_pct: 1.5       # v1.0に戻す
 
-  # RSI設定
+  # RSI��定
   rsi_period: 14
   rsi_oversold: 25                # v1.0に戻す
   rsi_overbought: 75              # v1.0に戻す
@@ -41,8 +42,8 @@ afternoon_reversal:
 
 exit:
   atr_period: 14
-  stop_loss_atr_multiplier: 1.2   # ★ 1.5 → 1.2（逆張り失敗時の損失を早めにカット）
-  take_profit_atr_multiplier: 1.5 # ★ 2.0 → 1.5（利確を近くして勝率UP）
+  stop_loss_atr_multiplier: 1.2   # 逆張り失敗時の損失を早めに��ット
+  take_profit_atr_multiplier: 1.5 # 利確を近くして勝率UP
   trailing_stop: true
   trailing_atr_multiplier: 1.5    # v1.0に戻す
   force_close_time: 1450
