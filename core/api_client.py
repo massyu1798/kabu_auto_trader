@@ -1,4 +1,4 @@
-"""kabu STATION API クライアント"""
+"""kabu STATION API クライアント (v13: configurable timeout)"""
 
 import requests
 import time
@@ -6,15 +6,15 @@ from core.auth import KabuAuth
 
 
 class KabuClient:
-    """kabu STATION REST API ラッパー"""
+    """kabu STATION REST API ラッ��ー"""
 
-    def __init__(self, base_url: str, auth: KabuAuth, timeout: int = 5):
+    def __init__(self, base_url: str, auth: KabuAuth, timeout: int = 10):
         self.base_url = base_url
         self.auth = auth
         self.timeout = timeout
 
     def _get(self, path: str, params: dict = None) -> dict:
-        """GETリクエスト"""
+        """GETリク��スト"""
         headers = self.auth.get_headers()
         if not headers:
             return None
@@ -41,6 +41,9 @@ class KabuClient:
                     return res.json()
             print(f"  ⚠️ API エラー: {path} -> {res.status_code}")
             return None
+        except requests.exceptions.Timeout:
+            print(f"  ⚠️ API タイムアウト: {path} (timeout={self.timeout}s) - skip to next loop")
+            return None
         except Exception as e:
             print(f"  ❌ API 通信エラー: {path} -> {e}")
             return None
@@ -60,6 +63,9 @@ class KabuClient:
             if res.status_code == 200:
                 return res.json()
             print(f"  ⚠️ API エラー: {path} -> {res.status_code} {res.text[:200]}")
+            return None
+        except requests.exceptions.Timeout:
+            print(f"  ⚠️ API タイムアウト: {path} (timeout={self.timeout}s)")
             return None
         except Exception as e:
             print(f"  ❌ API 通信エラー: {path} -> {e}")
@@ -102,7 +108,7 @@ class KabuClient:
         margin_trade_type: int = 3,
     ) -> dict:
         """
-        信用新規注文
+        ���用新規注文
 
         Args:
             symbol: 銘柄コード（例: "7203"）
@@ -128,7 +134,7 @@ class KabuClient:
             "MarginTradeType": margin_trade_type,
             "DelivType": 0,
             "FundType": "  ",
-            "AccountType": 4,             # 4=特定
+            "AccountType": 4,             # 4=特���
             "Qty": qty,
             "FrontOrderType": 10 if order_type == 1 else 20,
             "Price": price,
@@ -149,7 +155,7 @@ class KabuClient:
         margin_trade_type: int = 3,
     ) -> dict:
         """
-        信用返済注文
+        ���用返済注文
 
         Args:
             side: 建玉と反対のサイド（買建なら"SELL"、売建なら"BUY"）
