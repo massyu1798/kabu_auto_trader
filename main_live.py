@@ -1,5 +1,7 @@
 """
-JP Stock Auto Trading Bot v12.4 (Accel TS + ATR + VWAP Filter + Debug Log)
+JP Stock Auto Trading Bot v12.4 + Afternoon Reversal v1.2
+- Morning (9:05-11:00): Momentum + VWAP filter
+- Afternoon (12:35-14:00): RSI + BB reversal
 """
 
 import time
@@ -19,7 +21,13 @@ def load_config():
         live = yaml.safe_load(f)
     with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
         strategy = yaml.safe_load(f)
-    return live, strategy
+    # Load afternoon config
+    try:
+        with open("config/afternoon_config.yaml", "r", encoding="utf-8") as f:
+            afternoon = yaml.safe_load(f)
+    except FileNotFoundError:
+        afternoon = None
+    return live, strategy, afternoon
 
 def is_market_open() -> bool:
     now = datetime.now()
@@ -27,11 +35,22 @@ def is_market_open() -> bool:
     t = now.hour * 100 + now.minute
     return 900 <= t <= 1525
 
-def is_entry_allowed() -> bool:
-    """v12.4: 9:05-11:00 only"""
+def is_morning_entry() -> bool:
+    """Morning session: 9:05-11:00"""
     now = datetime.now()
     t = now.hour * 100 + now.minute
     return 905 <= t <= 1100
+
+def is_afternoon_entry() -> bool:
+    """Afternoon session: 12:35-14:00"""
+    now = datetime.now()
+    t = now.hour * 100 + now.minute
+    return 1235 <= t <= 1400
+
+def get_session_label() -> str:
+    if is_morning_entry(): return "AM"
+    if is_afternoon_entry(): return "PM"
+    return "--"
 
 def calc_atr(price_hist: dict, period: int = 14) -> float | None:
     """Calculate ATR using pandas_ta"""
@@ -47,7 +66,7 @@ def calc_atr(price_hist: dict, period: int = 14) -> float | None:
     return float(atr_series.iloc[-1])
 
 def calc_vwap(price_hist: dict) -> float | None:
-    """Calculate VWAP from price history (volume approximated by tick count)"""
+    """Calculate VWAP approximation from price history"""
     h = price_hist["high"]
     l = price_hist["low"]
     c = price_hist["close"]
@@ -59,13 +78,39 @@ def calc_vwap(price_hist: dict) -> float | None:
         tp_sum += tp
     return tp_sum / len(c)
 
-def calc_signals_with_score(prices: list[float], strategy_config: dict) -> tuple[str, float]:
-    """Return (signal, score) for debug logging"""
+def calc_rsi(prices: list[float], period: int = 14) -> float | None:
+    """Calculate RSI from price list"""
+    if len(prices) < period + 1:
+        return None
+    df = pd.DataFrame({"close": prices})
+    rsi_series = ta.rsi(df["close"], length=period)
+    if rsi_series is None or pd.isna(rsi_series.iloc[-1]):
+        return None
+    return float(rsi_series.iloc[-1])
+
+def calc_bb(prices: list[float], period: int = 20, std: float = 2.0) -> tuple[float, float, float] | None:
+    """Calculate Bollinger Bands (lower, mid, upper)"""
+    if len(prices) < period:
+        return None
+    df = pd.DataFrame({"close": prices})
+    bb = ta.bbands(df["close"], length=period, std=std)
+    if bb is None:
+        return None
+    lower = bb.iloc[-1, 0]
+    mid = bb.iloc[-1, 1]
+    upper = bb.iloc[-1, 2]
+    if pd.isna(lower) or pd.isna(mid) or pd.isna(upper):
+        return None
+    return (float(lower), float(mid), float(upper))
+
+# ============================================
+# Morning Momentum Signal
+# ============================================
+def calc_morning_signal(prices: list[float], strategy_config: dict) -> tuple[str, float]:
+    """Morning momentum: EMA crossover + Breakout"""
     if len(prices) < MIN_DATA_POINTS: return ("HOLD", -999.0)
     
     df = pd.DataFrame({"close": prices})
-    
-    # Trend follow
     tf = strategy_config["strategies"]["trend_follow"]["params"]
     ema_short_len = min(tf["ema_short"], len(prices) - 1)
     ema_long_len = min(tf["ema_long"], len(prices) - 1)
@@ -74,7 +119,6 @@ def calc_signals_with_score(prices: list[float], strategy_config: dict) -> tuple
 
     ema_s = ta.ema(df["close"], length=ema_short_len)
     ema_l = ta.ema(df["close"], length=ema_long_len)
-    
     if ema_s is None or ema_l is None: return ("HOLD", -999.0)
     
     score = 0.0
@@ -87,7 +131,6 @@ def calc_signals_with_score(prices: list[float], strategy_config: dict) -> tuple
         elif ema_s.iloc[last] < ema_l.iloc[last] and ema_s.iloc[prev] >= ema_l.iloc[prev]:
             score -= 1.0
 
-    # Breakout
     bo = strategy_config["strategies"]["breakout"]["params"]
     period = min(bo["channel_period"], len(prices) - 1)
     if period >= 3 and last >= period:
@@ -99,8 +142,58 @@ def calc_signals_with_score(prices: list[float], strategy_config: dict) -> tuple
         return ("BUY", score)
     return ("HOLD", score)
 
+# ============================================
+# Afternoon Reversal Signal
+# ============================================
+def calc_afternoon_signal(price_hist: dict, afternoon_cfg: dict) -> tuple[str, dict]:
+    """Afternoon reversal: RSI oversold + BB lower + price below VWAP"""
+    prices = price_hist["close"]
+    if len(prices) < MIN_DATA_POINTS:
+        return ("HOLD", {})
+
+    ar = afternoon_cfg["afternoon_reversal"]
+    current = prices[-1]
+
+    # RSI
+    rsi = calc_rsi(prices, ar.get("rsi_period", 14))
+    if rsi is None:
+        return ("HOLD", {})
+
+    # Bollinger Bands
+    bb = calc_bb(prices, ar.get("bb_period", 20), ar.get("bb_std", 2.0))
+    if bb is None:
+        return ("HOLD", {})
+    bb_lower, bb_mid, bb_upper = bb
+
+    # VWAP
+    vwap = calc_vwap(price_hist)
+
+    # Check if price dropped from recent high (reversal candidate)
+    recent_high = max(prices[-MIN_DATA_POINTS:])
+    recent_low = min(prices[-MIN_DATA_POINTS:])
+    move_pct = 0.0
+    if recent_high > 0:
+        move_pct = ((current - recent_high) / recent_high) * 100
+
+    info = {"rsi": rsi, "bb_lower": bb_lower, "bb_upper": bb_upper, "vwap": vwap, "move_pct": move_pct}
+
+    # BUY: oversold reversal
+    rsi_oversold = ar.get("rsi_oversold", 25)
+    if rsi <= rsi_oversold and current <= bb_lower:
+        return ("BUY", info)
+
+    # SELL: overbought reversal (not used in current strategy, sell_threshold=-99)
+    rsi_overbought = ar.get("rsi_overbought", 75)
+    if rsi >= rsi_overbought and current >= bb_upper:
+        return ("SELL", info)
+
+    return ("HOLD", info)
+
+# ============================================
+# Main
+# ============================================
 def main():
-    live_cfg, strat_cfg = load_config()
+    live_cfg, strat_cfg, afternoon_cfg = load_config()
     auth = KabuAuth(live_cfg["api"]["base_url"], live_cfg["api"]["password"])
     client = KabuClient(live_cfg["api"]["base_url"], auth)
     order_mgr = OrderManager(client, live_cfg)
@@ -108,13 +201,19 @@ def main():
     price_history = {ticker: {"high": [], "low": [], "close": []} for ticker in live_cfg["watchlist"]}
     last_signal_time = 0
     signal_check_count = 0
+
+    pm_available = afternoon_cfg is not None
     
-    print("Bot running... (v12.4 Accel TS + ATR + VWAP Filter + Debug)")
+    print("Bot running... (v12.4 AM Momentum + PM Reversal v1.2)")
     print(f"  Watchlist: {live_cfg['watchlist']}")
-    print(f"  Buy threshold: {strat_cfg['ensemble']['buy_threshold']}")
-    print(f"  Entry window: 9:05 - 11:00")
-    print(f"  SL: {strat_cfg['exit']['stop_loss_atr_multiplier']} ATR / TP: {strat_cfg['exit']['take_profit_rr_ratio']} R:R")
-    print(f"  Min data points for signal: {MIN_DATA_POINTS}")
+    print(f"  [AM] Entry: 9:05-11:00 | threshold: {strat_cfg['ensemble']['buy_threshold']} | SL: {strat_cfg['exit']['stop_loss_atr_multiplier']} ATR / TP: {strat_cfg['exit']['take_profit_rr_ratio']} R:R")
+    if pm_available:
+        ar = afternoon_cfg["afternoon_reversal"]
+        pm_exit = afternoon_cfg["exit"]
+        print(f"  [PM] Entry: 12:35-14:00 | RSI<={ar['rsi_oversold']} + BB | SL: {pm_exit['stop_loss_atr_multiplier']} ATR / TP: {pm_exit['take_profit_atr_multiplier']} ATR")
+    else:
+        print("  [PM] afternoon_config.yaml not found - PM session disabled")
+    print(f"  Min data points: {MIN_DATA_POINTS}")
 
     try:
         while True:
@@ -139,7 +238,7 @@ def main():
                             ph[key] = ph[key][-500:]
                 time.sleep(1)
 
-            # Position management
+            # Position management (works for both AM and PM positions)
             for pos in list(order_mgr.positions):
                 ph = price_history.get(pos.ticker)
                 if ph is None or len(ph["close"]) < 2:
@@ -172,63 +271,97 @@ def main():
                 last_signal_time = time.time()
                 now = datetime.now()
                 now_str = now.strftime("%H:%M:%S")
+                session = get_session_label()
                 signal_check_count += 1
 
-                if not is_entry_allowed():
+                morning = is_morning_entry()
+                afternoon = is_afternoon_entry() and pm_available
+
+                if not morning and not afternoon:
                     if signal_check_count % 10 == 1:
-                        print(f"  [{now_str}] Entry window closed (9:05-11:00). Positions: {len(order_mgr.positions)}")
+                        print(f"  [{now_str}] No entry window. Positions: {len(order_mgr.positions)}")
                 else:
                     # Log data status every 5 checks
                     if signal_check_count % 5 == 1:
-                        print(f"\n  [{now_str}] === Signal Check #{signal_check_count} ===")
+                        print(f"\n  [{now_str}] === [{session}] Signal Check #{signal_check_count} ===")
                         for ticker in live_cfg["watchlist"]:
                             data_len = len(price_history[ticker]["close"])
                             last_price = price_history[ticker]["close"][-1] if data_len > 0 else 0
                             vwap = calc_vwap(price_history[ticker])
                             vwap_str = f"{vwap:.1f}" if vwap else "N/A"
                             ready = "OK" if data_len >= MIN_DATA_POINTS else "waiting"
-                            print(f"    {ticker}: price={last_price:.0f} vwap={vwap_str} data={data_len}/{MIN_DATA_POINTS} [{ready}]")
+                            rsi = calc_rsi(price_history[ticker]["close"], 14)
+                            rsi_str = f"{rsi:.1f}" if rsi else "N/A"
+                            print(f"    {ticker}: price={last_price:.0f} vwap={vwap_str} rsi={rsi_str} data={data_len}/{MIN_DATA_POINTS} [{ready}]")
 
                     for ticker in live_cfg["watchlist"]:
                         if not order_mgr.can_entry(ticker): continue
                         
-                        prices = price_history[ticker]["close"]
-                        signal, score = calc_signals_with_score(prices, strat_cfg)
+                        # ========== MORNING MOMENTUM ==========
+                        if morning:
+                            prices = price_history[ticker]["close"]
+                            signal, score = calc_morning_signal(prices, strat_cfg)
 
-                        # Log BUY signals and near-BUY scores
-                        if score > 0:
-                            print(f"  [{now_str}] {ticker}: score={score:.1f} signal={signal} (threshold={strat_cfg['ensemble']['buy_threshold']})")
+                            if score > 0:
+                                print(f"  [{now_str}] [AM] {ticker}: score={score:.1f} signal={signal} (threshold={strat_cfg['ensemble']['buy_threshold']})")
 
-                        if signal == "BUY":
-                            current = prices[-1]
+                            if signal == "BUY":
+                                current = prices[-1]
+                                vwap = calc_vwap(price_history[ticker])
+                                if vwap is not None and current < vwap:
+                                    print(f"  [{now_str}] [AM] {ticker}: BUY blocked by VWAP (price={current:.0f} < vwap={vwap:.0f})")
+                                    continue
+                                
+                                atr_val = calc_atr(price_history[ticker], strat_cfg["exit"].get("atr_period", 14))
+                                if atr_val is None:
+                                    atr_val = max(current * 0.01, 1)
 
-                            # VWAP filter
-                            vwap = calc_vwap(price_history[ticker])
-                            if vwap is not None and current < vwap:
-                                print(f"  [{now_str}] {ticker}: BUY blocked by VWAP filter (price={current:.0f} < vwap={vwap:.0f})")
-                                continue
-                            
-                            # ATR-based SL/TP
-                            atr_val = calc_atr(price_history[ticker], strat_cfg["exit"].get("atr_period", 14))
-                            if atr_val is None:
-                                atr_val = max(current * 0.01, 1)
+                                sl_dist = atr_val * strat_cfg["exit"]["stop_loss_atr_multiplier"]
+                                sl_dist = max(sl_dist, 1)
+                                risk_per = live_cfg["trade"]["risk_per_trade"]
 
-                            sl_mult = strat_cfg["exit"]["stop_loss_atr_multiplier"]
-                            tp_rr = strat_cfg["exit"]["take_profit_rr_ratio"]
-                            risk_per = live_cfg["trade"]["risk_per_trade"]
+                                size = int((live_cfg["trade"]["initial_capital"] * risk_per) / sl_dist)
+                                size = max((size // 100) * 100, 100)
 
-                            sl_dist = atr_val * sl_mult
-                            sl_dist = max(sl_dist, 1)
+                                entry_price = current
+                                stop_loss = entry_price - sl_dist
+                                take_profit = entry_price + sl_dist * strat_cfg["exit"]["take_profit_rr_ratio"]
 
-                            size = int((live_cfg["trade"]["initial_capital"] * risk_per) / sl_dist)
-                            size = max((size // 100) * 100, 100)
+                                print(f"  [{now_str}] [AM] >>> ENTRY {ticker}: price={entry_price:.0f} SL={stop_loss:.0f} TP={take_profit:.0f} size={size}")
+                                order_mgr.entry(ticker, "BUY", entry_price, size, stop_loss, take_profit)
 
-                            entry_price = current
-                            stop_loss = entry_price - sl_dist
-                            take_profit = entry_price + sl_dist * tp_rr
+                        # ========== AFTERNOON REVERSAL ==========
+                        if afternoon:
+                            signal, info = calc_afternoon_signal(price_history[ticker], afternoon_cfg)
+                            rsi_val = info.get("rsi", 0)
+                            bb_lower = info.get("bb_lower", 0)
 
-                            print(f"  [{now_str}] >>> ENTRY {ticker}: price={entry_price:.0f} SL={stop_loss:.0f} TP={take_profit:.0f} size={size} ATR={atr_val:.1f}")
-                            order_mgr.entry(ticker, "BUY", entry_price, size, stop_loss, take_profit)
+                            if rsi_val and rsi_val < 40:
+                                print(f"  [{now_str}] [PM] {ticker}: RSI={rsi_val:.1f} signal={signal}")
+
+                            if signal == "BUY":
+                                current = price_history[ticker]["close"][-1]
+
+                                pm_exit = afternoon_cfg["exit"]
+                                atr_val = calc_atr(price_history[ticker], pm_exit.get("atr_period", 14))
+                                if atr_val is None:
+                                    atr_val = max(current * 0.01, 1)
+
+                                sl_dist = atr_val * pm_exit["stop_loss_atr_multiplier"]
+                                sl_dist = max(sl_dist, 1)
+                                tp_dist = atr_val * pm_exit["take_profit_atr_multiplier"]
+
+                                pm_global = afternoon_cfg["global"]
+                                risk_per = pm_global["risk_per_trade"]
+                                size = int((pm_global["initial_capital"] * risk_per) / sl_dist)
+                                size = max((size // 100) * 100, 100)
+
+                                entry_price = current
+                                stop_loss = entry_price - sl_dist
+                                take_profit = entry_price + tp_dist
+
+                                print(f"  [{now_str}] [PM] >>> ENTRY {ticker}: price={entry_price:.0f} SL={stop_loss:.0f} TP={take_profit:.0f} size={size} RSI={rsi_val:.1f}")
+                                order_mgr.entry(ticker, "BUY", entry_price, size, stop_loss, take_profit)
 
             time.sleep(live_cfg["interval"]["price_check_sec"])
 
