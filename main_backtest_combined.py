@@ -2,8 +2,16 @@
 合体バックテスト: 午前 v12.4 + 午後リバーサル v1.2
 - 午前（9:00-12:00）: モーニング・モメンタム順張り
 - 午後（12:30-14:00）: アフタヌーン・リバーサル逆張り
+
+CLI Options:
+  --last-days N        直近N営業日の日次レポート (default: 7)
+  --export FILE        トレード明細をCSV/JSON出力 (拡張子で判定)
+  --export-daily FILE  日次集計をCSV/JSON出力
+  --print-latest       最新日のAM/PM別損益をコンソール表示
+  --no-summary         総合サマリ出力を抑制
 """
 
+import argparse
 import pandas as pd
 import yfinance as yf
 import yaml
@@ -11,6 +19,17 @@ import pandas_ta as ta
 from backtest.engine import BacktestEngine
 from backtest.afternoon_engine import AfternoonBacktestEngine
 from backtest.screener import screen_stocks
+from backtest.trade_export import (
+    build_trades_df,
+    build_daily_pnl,
+    get_latest_day_summary,
+    export_trades_csv,
+    export_trades_json,
+    export_daily_csv,
+    export_daily_json,
+    print_daily_table,
+    print_latest_day,
+)
 from strategy.ensemble import EnsembleEngine
 from strategy.afternoon_reversal import AfternoonReversalEngine
 
@@ -137,7 +156,44 @@ def format_report_section(title, trades, initial_capital, equity_curve):
 """
 
 
+def _detect_format(filepath: str) -> str:
+    """Detect file format from extension."""
+    lower = filepath.lower()
+    if lower.endswith(".json"):
+        return "json"
+    return "csv"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="合体バックテスト: 午前 v12.4 + 午後リバーサル v1.2"
+    )
+    parser.add_argument(
+        "--last-days", type=int, default=7,
+        help="直近N営業日の日次レポートを表示 (default: 7)"
+    )
+    parser.add_argument(
+        "--export", type=str, default=None, metavar="FILE",
+        help="トレード明細をCSV/JSONで出力 (拡張子で判定)"
+    )
+    parser.add_argument(
+        "--export-daily", type=str, default=None, metavar="FILE",
+        help="日次集計をCSV/JSONで出力"
+    )
+    parser.add_argument(
+        "--print-latest", action="store_true",
+        help="最新日（データ上の最終日）のAM/PM別損益を表示"
+    )
+    parser.add_argument(
+        "--no-summary", action="store_true",
+        help="総合サマリ出力を抑制"
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     print("=" * 60)
     print("  午前v12.4 + 午後リバーサルv1.2 合体バックテスト")
     print("=" * 60)
@@ -210,7 +266,7 @@ def main():
     morning_pnl = sum(t.pnl for t in morning_result.trades)
     afternoon_pnl = sum(t.pnl for t in afternoon_result.trades)
 
-    # 合算DD（簡易: 各セッョンの最大DDの大きい方）
+    # 合算DD（簡易: 各セッションの最大DDの大きい方）
     def calc_dd(equity_curve):
         if not equity_curve:
             return 0
@@ -227,8 +283,9 @@ def main():
     morning_dd = calc_dd(morning_result.equity_curve)
     afternoon_dd = calc_dd(afternoon_result.equity_curve)
 
-    # === レポート出力 ===
-    report = f"""
+    # === レポート出力（従来の総合サマリ）===
+    if not args.no_summary:
+        report = f"""
 ============================================================
   午前v12.4 + 午後リバーサルv1.2 合体レポート
 ============================================================
@@ -245,8 +302,49 @@ def main():
 {format_report_section("午前 v12.4 モーニング・モメンタム", morning_result.trades, initial_capital, morning_result.equity_curve)}
 {format_report_section("午後 v1.2 アフタヌーン・リバーサル", afternoon_result.trades, initial_capital, afternoon_result.equity_curve)}
 """
-    print(report)
-    print("完了")
+        print(report)
+
+    # ===========================================================
+    # Trade Export & Daily Report (new features)
+    # ===========================================================
+
+    # Build unified trades DataFrame
+    trades_df = build_trades_df(morning_result.trades, afternoon_result.trades)
+
+    if trades_df.empty:
+        print("\n⚠️ トレードが0件のため、日次レポート・エクスポートはスキップします。")
+    else:
+        # --- Daily PnL table (always show last N days) ---
+        last_days = args.last_days
+        daily_df = build_daily_pnl(trades_df, last_days=last_days)
+
+        print(f"\n■ 直近 {last_days} 営業日の日次損益")
+        print_daily_table(daily_df)
+
+        # --- Latest day summary ---
+        if args.print_latest:
+            latest = get_latest_day_summary(trades_df)
+            print_latest_day(latest)
+
+        # --- Export trade detail ---
+        if args.export:
+            fmt = _detect_format(args.export)
+            if fmt == "json":
+                export_trades_json(trades_df, args.export)
+            else:
+                export_trades_csv(trades_df, args.export)
+
+        # --- Export daily PnL ---
+        if args.export_daily:
+            # Export full daily (not limited to last_days)
+            daily_full = build_daily_pnl(trades_df, last_days=None)
+            fmt = _detect_format(args.export_daily)
+            if fmt == "json":
+                export_daily_json(daily_full, args.export_daily)
+            else:
+                export_daily_csv(daily_full, args.export_daily)
+
+    print("\n完了")
 
 
 if __name__ == "__main__":
