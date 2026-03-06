@@ -4,6 +4,7 @@ JP Stock Auto Trading Bot v13
 - Afternoon (12:35-14:00): AfternoonReversalEngine (BUY + SELL)
 - 5-min OHLCV bars from /board API
 - Short (SELL) position support: symmetric SL/TP/trailing
+- Notional cap: auto-shrink size when order value > initial_capital
 """
 
 import time
@@ -76,6 +77,34 @@ def calc_atr_from_bars(df: pd.DataFrame, period: int = 14) -> float | None:
     if atr_series is None or pd.isna(atr_series.iloc[-1]):
         return None
     return float(atr_series.iloc[-1])
+
+
+# ============================================
+# Notional cap helper (Method B: auto-shrink)
+# ============================================
+
+def cap_size_by_notional(size: int, entry_price: float, max_capital: float,
+                         session: str, ticker: str, now_str: str) -> int | None:
+    """
+    Check if notional (entry_price * size) exceeds max_capital.
+    If it does, shrink size to fit within max_capital (100-share units).
+    Returns adjusted size, or None if even 100 shares exceed cap.
+    """
+    notional = entry_price * size
+    if notional <= max_capital:
+        return size  # no adjustment needed
+
+    max_size = int(max_capital / entry_price)
+    max_size = (max_size // 100) * 100  # round down to 100-share unit
+
+    if max_size < 100:
+        print(f"  [{now_str}] [{session}] {ticker}: SKIP (cap too small) "
+              f"cap={max_capital:,.0f} price={entry_price:.0f}")
+        return None
+
+    print(f"  [{now_str}] [{session}] {ticker}: size capped {size} -> {max_size} "
+          f"(notional {notional:,.0f} > cap {max_capital:,.0f})")
+    return max_size
 
 
 # ============================================
@@ -321,6 +350,14 @@ def main():
                                 size = int((live_cfg["trade"]["initial_capital"] * risk_per) / sl_dist)
                                 size = max((size // 100) * 100, 100)
 
+                                # --- Notional cap (Method B: auto-shrink) ---
+                                max_cap = float(live_cfg["trade"]["initial_capital"])
+                                size = cap_size_by_notional(
+                                    size, current, max_cap, "AM", ticker, now_str)
+                                if size is None:
+                                    continue
+                                # --- End notional cap ---
+
                                 entry_price = current
                                 stop_loss, take_profit, trailing_stop = calc_entry_params(
                                     signal, entry_price, sl_dist, tp_dist)
@@ -354,6 +391,14 @@ def main():
                                 risk_per = pm_global["risk_per_trade"]
                                 size = int((pm_global["initial_capital"] * risk_per) / sl_dist)
                                 size = max((size // 100) * 100, 100)
+
+                                # --- Notional cap (Method B: auto-shrink) ---
+                                max_cap = float(pm_global["initial_capital"])
+                                size = cap_size_by_notional(
+                                    size, current, max_cap, "PM", ticker, now_str)
+                                if size is None:
+                                    continue
+                                # --- End notional cap ---
 
                                 entry_price = current
                                 stop_loss, take_profit, trailing_stop = calc_entry_params(
