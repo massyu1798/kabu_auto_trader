@@ -1,4 +1,4 @@
-"""発注・ポジション管理モジュール (v13.1: BT-aligned cooldown)"""
+"""発注・ポジション管理モジュール (v15: BT-aligned cooldown)"""
 
 import time
 from datetime import datetime, timedelta
@@ -39,7 +39,7 @@ class LiveTrade:
 
 
 class OrderManager:
-    """発注・ポジション管理 (v13.1: BT-aligned cooldown)"""
+    """発注・ポジション管理 (v15: BT-aligned cooldown)"""
 
     def __init__(self, client: KabuClient, config: dict):
         self.client = client
