@@ -1,5 +1,5 @@
 # ============================================
-# 本番設定（v13.1 BT-aligned）- テンプレート
+# 本番設定（v15 BT-aligned）- テンプレート
 # ============================================
 
 api:
@@ -18,7 +18,7 @@ trade:
   max_daily_loss: 0.03            # BT strategy_config.global.max_daily_loss に合わせる
   margin_type: "day_trade"
 
-# v13.1: screener設定
+# screener設定
 # enabled=true の場合、起動時に screen_stocks() を実行しBTと同じ銘柄を自動選定
 # enabled=false の場合、下記 watchlist を使用
 screener:
@@ -36,6 +36,7 @@ watchlist:
   - "6758"  # ソニー
   - "6501"  # 日立
   - "8306"  # 三菱UFJ
+  - "6902"  # デンソー
 
 interval:
   price_check_sec: 30
