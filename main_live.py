@@ -1,5 +1,5 @@
 """
-JP Stock Auto Trading Bot v13.1 - BT-aligned
+JP Stock Auto Trading Bot v15 - BT-aligned
 - Morning (9:05-11:00): EnsembleEngine (BUY + SELL) + daily bias filter
 - Afternoon (config entry_start-entry_end): AfternoonReversalEngine (BUY + SELL)
 - 5-min OHLCV bars from /board API
@@ -27,7 +27,7 @@ from backtest.screener import screen_stocks
 # Minimum completed 5-min bars required for signal calculation
 MIN_BARS = 10
 
-VERSION = "v13.1"
+VERSION = "v15"
 
 
 def load_config():
