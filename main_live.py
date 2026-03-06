@@ -58,7 +58,8 @@ def run_screener(strat_cfg: dict, fallback_watchlist: list[str]) -> list[str]:
         selected = screen_stocks(strat_cfg)
         if not selected:
             print("  ⚠️ Screener returned 0 stocks, using fallback watchlist")
-            return fallback_watchlist
+            ticker_map = {t: f"{t}.T" for t in fallback_watchlist}
+            return fallback_watchlist, ticker_map
 
         # Convert "6902.T" -> "6902" for kabuSte API
         tickers = []
