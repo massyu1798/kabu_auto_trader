@@ -1,15 +1,17 @@
 """
-JP Stock Auto Trading Bot v15 - BT-aligned
+JP Stock Auto Trading Bot v15.1 - BT-aligned + API error handling
 - Morning (9:05-11:00): EnsembleEngine (BUY + SELL) + daily bias filter
 - Afternoon (config entry_start-entry_end): AfternoonReversalEngine (BUY + SELL)
 - 5-min OHLCV bars from /board API
 - Screener-based watchlist (same as BT)
 - Short (SELL) position support: symmetric SL/TP/trailing
-- Total exposure check (BT-aligned)
+- Total exposure check (BT-aligned) with safety margin
 - Force close: PM at force_close_time, all at market close
 - Cooldown: config-based bars (BT-aligned)
+- API error handling: blacklist, order throttle, break on 429
 """
 
+import math
 import time
 import yaml
 import pandas as pd
@@ -27,7 +29,35 @@ from backtest.screener import screen_stocks
 # Minimum completed 5-min bars required for signal calculation
 MIN_BARS = 10
 
-VERSION = "v15"
+VERSION = "v15.1"
+
+# ============================================
+# Constants for API error handling / throttle
+# ============================================
+
+# Safety margin: effective_cap = floor(raw_cap * SAFETY_MARGIN_RATIO)
+SAFETY_MARGIN_RATIO = 0.98
+
+# Max orders per signal check (prevents burst sendorder)
+MAX_ORDERS_PER_CHECK_AM = 2
+MAX_ORDERS_PER_CHECK_PM = 1
+
+# Interval (sec) between sendorder calls to avoid 429
+ORDER_INTERVAL_SEC = 0.8
+
+# API error codes
+CODE_ONESHOT_AMOUNT = 4003001   # ワンショット：金額エラー
+CODE_RATE_LIMIT = 4001006       # API実行回数エラー
+CODE_MARGIN_BLOCKED = 100368    # 信用新規抑止
+
+# Retry shrink ratio for 4003001
+RETRY_SHRINK_RATIO = 0.80
+
+# Block duration for 4003001 retry failure (minutes)
+BLOCK_MINUTES_ONESHOT = 30
+
+# Block duration for unknown errors (minutes)
+BLOCK_MINUTES_UNKNOWN = 10
 
 
 def load_config():
@@ -192,29 +222,33 @@ def calc_atr_from_bars(df: pd.DataFrame, period: int = 14) -> float | None:
 
 
 # ============================================
-# Total exposure check (BT-aligned)
+# Total exposure check (BT-aligned) + safety margin
 # ============================================
 
 def check_total_exposure(positions: list, new_price: float, new_size: int,
                          initial_capital: float, session: str, ticker: str,
                          now_str: str) -> int | None:
     """
-    BT-aligned total exposure check.
-    existing_exposure + new_notional must be <= initial_capital.
+    BT-aligned total exposure check with safety margin.
+    existing_exposure + new_notional must be <= effective_cap.
+    effective_cap = floor(initial_capital * SAFETY_MARGIN_RATIO).
     If exceeded, auto-shrink size (Method B). Returns adjusted size or None.
     """
+    raw_cap = initial_capital
+    effective_cap = math.floor(raw_cap * SAFETY_MARGIN_RATIO)
+
     existing_exposure = sum(p.entry_price * p.size for p in positions)
     new_notional = new_price * new_size
     total = existing_exposure + new_notional
 
-    if total <= initial_capital:
+    if total <= effective_cap:
         return new_size
 
     # How much room is left?
-    remaining = initial_capital - existing_exposure
+    remaining = effective_cap - existing_exposure
     if remaining <= 0:
         print(f"  [{now_str}] [{session}] {ticker}: SKIP (exposure full) "
-              f"existing={existing_exposure:,.0f} cap={initial_capital:,.0f}")
+              f"existing={existing_exposure:,.0f} raw_cap={raw_cap:,.0f} effective_cap={effective_cap:,.0f}")
         return None
 
     max_size = int(remaining / new_price)
@@ -222,12 +256,176 @@ def check_total_exposure(positions: list, new_price: float, new_size: int,
 
     if max_size < 100:
         print(f"  [{now_str}] [{session}] {ticker}: SKIP (remaining cap too small) "
-              f"remaining={remaining:,.0f} price={new_price:.0f}")
+              f"remaining={remaining:,.0f} price={new_price:.0f} effective_cap={effective_cap:,.0f}")
         return None
 
     print(f"  [{now_str}] [{session}] {ticker}: size capped {new_size} -> {max_size} "
-          f"(total_exposure {total:,.0f} > cap {initial_capital:,.0f})")
+          f"(exposure {total:,.0f} > effective_cap {effective_cap:,.0f}, raw_cap={raw_cap:,.0f})")
     return max_size
+
+
+# ============================================
+# Blacklist management (per-ticker order block)
+# ============================================
+
+class TickerBlacklist:
+    """In-memory per-ticker blacklist for API error avoidance."""
+
+    def __init__(self):
+        self._blocked: dict[str, tuple[datetime, str]] = {}  # ticker -> (unblock_time, reason)
+
+    def block(self, ticker: str, until: datetime, reason: str):
+        self._blocked[ticker] = (until, reason)
+        print(f"  🚫 BLOCKED {ticker} until {until.strftime('%H:%M:%S')} reason={reason}")
+
+    def block_until_eod(self, ticker: str, reason: str):
+        """Block until 15:30 (after market close)."""
+        today = datetime.now().replace(hour=15, minute=30, second=0, microsecond=0)
+        self.block(ticker, today, reason)
+
+    def is_blocked(self, ticker: str) -> bool:
+        if ticker not in self._blocked:
+            return False
+        until, reason = self._blocked[ticker]
+        if datetime.now() >= until:
+            del self._blocked[ticker]
+            return False
+        return True
+
+    def get_reason(self, ticker: str) -> str:
+        if ticker in self._blocked:
+            until, reason = self._blocked[ticker]
+            remaining = (until - datetime.now()).total_seconds()
+            return f"{reason} (unblock in {remaining:.0f}s at {until.strftime('%H:%M:%S')})"
+        return ""
+
+    def daily_reset(self):
+        self._blocked.clear()
+
+
+# ============================================
+# Priority scoring for order candidates
+# ============================================
+
+def calc_priority_score(signal: str, info: dict) -> float:
+    """Calculate priority score for order candidate ranking.
+
+    SELL: higher RSI = higher priority, larger morning_move = higher priority
+    BUY : lower RSI  = higher priority, larger |morning_move| = higher priority
+    """
+    rsi = info.get("rsi") or 50.0
+    mm = abs(info.get("morning_move") or 0.0)
+
+    if signal == "SELL":
+        # RSI 0-100 -> normalized 0-1 (higher is better)
+        score = (rsi / 100.0) * 0.6 + min(mm / 5.0, 1.0) * 0.4
+    else:  # BUY
+        # RSI 0-100 -> inverted (lower RSI = higher priority)
+        score = ((100.0 - rsi) / 100.0) * 0.6 + min(mm / 5.0, 1.0) * 0.4
+    return score
+
+
+# ============================================
+# Order execution with error handling
+# ============================================
+
+def execute_entry_with_error_handling(
+    order_mgr: OrderManager,
+    ticker: str,
+    signal: str,
+    entry_price: float,
+    size: int,
+    stop_loss: float,
+    take_profit: float,
+    reason: str,
+    session: str,
+    blacklist: TickerBlacklist,
+    now_str: str,
+) -> str:
+    """Execute entry with error-code-based handling.
+
+    Returns:
+        "ok"        - order placed successfully
+        "break"     - caller should break (stop all further orders this cycle)
+        "skip"      - this ticker failed but caller may continue to next ticker
+        "retry_ok"  - shrink-retry succeeded
+    """
+
+    # Pre-order sleep to avoid 429
+    time.sleep(ORDER_INTERVAL_SEC)
+
+    result = order_mgr.entry(
+        ticker, signal, entry_price, size,
+        stop_loss, take_profit, reason, session=session,
+    )
+
+    if result.get("ok"):
+        return "ok"
+
+    # --- Error handling ---
+    code = result.get("code", 0)
+    http_status = result.get("http", 0)
+
+    # A) 429 / CODE_RATE_LIMIT -> break this cycle
+    if http_status == 429 or code == CODE_RATE_LIMIT:
+        print(f"  ⛔ [{session}] {ticker}: 429 rate limit (code={code}) "
+              f"-> stop further orders this cycle")
+        return "break"
+
+    # B) 500 / CODE_MARGIN_BLOCKED -> blacklist EOD
+    if code == CODE_MARGIN_BLOCKED:
+        print(f"  ⛔ [{session}] {ticker}: 100368 margin blocked -> block until EOD")
+        blacklist.block_until_eod(ticker, f"100368: {result.get('message','')}")
+        return "skip"
+
+    # C) 400 / CODE_ONESHOT_AMOUNT -> 1 shrink retry
+    if code == CODE_ONESHOT_AMOUNT:
+        retry_size = int(size * RETRY_SHRINK_RATIO)
+        retry_size = (retry_size // 100) * 100
+        if retry_size < 100:
+            print(f"  ⛔ [{session}] {ticker}: 4003001 oneshot -> shrink retry impossible (size too small)")
+            blacklist.block(ticker,
+                            datetime.now() + timedelta(minutes=BLOCK_MINUTES_ONESHOT),
+                            f"4003001 no viable size")
+            return "skip"
+
+        retry_notional = entry_price * retry_size
+        print(f"  🔄 [{session}] {ticker}: 4003001 oneshot -> shrink retry "
+              f"size {size}->{retry_size} notional={retry_notional:,.0f}")
+
+        time.sleep(ORDER_INTERVAL_SEC)
+
+        retry_result = order_mgr.entry(
+            ticker, signal, entry_price, retry_size,
+            stop_loss, take_profit, reason + " [shrink-retry]", session=session,
+        )
+
+        if retry_result.get("ok"):
+            return "retry_ok"
+
+        retry_code = retry_result.get("code", 0)
+        retry_http = retry_result.get("http", 0)
+
+        # Retry also hit rate limit -> break
+        if retry_http == 429 or retry_code == CODE_RATE_LIMIT:
+            print(f"  ⛔ [{session}] {ticker}: retry also got 429 -> break cycle")
+            return "break"
+
+        # Retry still failed -> block short-term
+        print(f"  ⛔ [{session}] {ticker}: shrink retry also failed "
+              f"(code={retry_code}) -> block {BLOCK_MINUTES_ONESHOT}min")
+        blacklist.block(ticker,
+                        datetime.now() + timedelta(minutes=BLOCK_MINUTES_ONESHOT),
+                        f"4003001 retry failed (code={retry_code})")
+        return "skip"
+
+    # D) Other errors -> short-term block, skip
+    print(f"  ⚠️ [{session}] {ticker}: unknown error http={http_status} code={code} "
+          f"-> block {BLOCK_MINUTES_UNKNOWN}min")
+    blacklist.block(ticker,
+                    datetime.now() + timedelta(minutes=BLOCK_MINUTES_UNKNOWN),
+                    f"unknown error http={http_status} code={code}")
+    return "skip"
 
 
 # ============================================
@@ -301,6 +499,9 @@ def main():
                     timeout=api_timeout)
     client = KabuClient(live_cfg["api"]["base_url"], auth, timeout=api_timeout)
     order_mgr = OrderManager(client, live_cfg)
+
+    # Blacklist instance (in-memory, reset daily)
+    blacklist = TickerBlacklist()
 
     # ================================================
     # 1) Screener: BT-aligned watchlist
@@ -385,12 +586,15 @@ def main():
     pm_initial_capital = float(afternoon_cfg["global"]["initial_capital"]) if afternoon_cfg else am_initial_capital
 
     print(f"\n{'='*60}")
-    print(f"Bot running... ({VERSION} BT-aligned)")
+    print(f"Bot running... ({VERSION} BT-aligned + error handling)")
     print(f"{'='*60}")
     print(f"  Watchlist: {len(watchlist)} stocks (screener={'ON' if use_screener else 'OFF'})")
     print(f"  AM Initial capital: {am_initial_capital:,.0f}")
     print(f"  PM Initial capital: {pm_initial_capital:,.0f}")
     print(f"  API timeout: {api_timeout}s")
+    print(f"  Safety margin: {SAFETY_MARGIN_RATIO} (effective_cap = raw * {SAFETY_MARGIN_RATIO})")
+    print(f"  Max orders/check: AM={MAX_ORDERS_PER_CHECK_AM} PM={MAX_ORDERS_PER_CHECK_PM}")
+    print(f"  Order interval: {ORDER_INTERVAL_SEC}s")
     print(f"  [AM] Entry: 9:05-11:00 | buy_thr={ensemble_cfg['buy_threshold']} sell_thr={ensemble_cfg['sell_threshold']}")
     print(f"       SL: {strat_cfg['exit']['stop_loss_atr_multiplier']} ATR | TP: {strat_cfg['exit']['take_profit_rr_ratio']} R:R")
     print(f"       Daily bias: EMA {strat_cfg.get('daily_bias',{}).get('ema_short',5)}/{strat_cfg.get('daily_bias',{}).get('ema_long',25)} (BEAR=disabled)")
@@ -427,7 +631,8 @@ def main():
                 order_mgr.daily_pnl = 0.0
                 order_mgr.daily_trade_count = 0
                 order_mgr.cooldown_until.clear()
-                print(f"  [{now_str}] Daily PnL/cooldown reset")
+                blacklist.daily_reset()
+                print(f"  [{now_str}] Daily PnL/cooldown/blacklist reset")
 
             # ========================================
             # 4) Force close: PM positions at force_close_time, all at 1520
@@ -516,27 +721,31 @@ def main():
                             bars_df = bar_builder.get_bars(ticker)
                             last_price = float(bars_df["close"].iloc[-1]) if not bars_df.empty else 0
                             ready = "OK" if n_bars >= MIN_BARS else "waiting"
-                            print(f"    {ticker}: price={last_price:.0f} bars={n_bars}/{MIN_BARS} [{ready}]")
+                            bl_tag = " [BLOCKED]" if blacklist.is_blocked(ticker) else ""
+                            print(f"    {ticker}: price={last_price:.0f} bars={n_bars}/{MIN_BARS} [{ready}]{bl_tag}")
                         if len(watchlist) > 15:
                             print(f"    ... and {len(watchlist)-15} more stocks")
 
-                    for ticker in watchlist:
-                        if not order_mgr.can_entry(ticker):
-                            continue
+                    # ========================================
+                    # Collect AM candidates
+                    # ========================================
+                    am_candidates = []  # [(ticker, signal, score, detail, bars_df)]
+                    if morning:
+                        for ticker in watchlist:
+                            if not order_mgr.can_entry(ticker):
+                                continue
+                            if blacklist.is_blocked(ticker):
+                                continue
 
-                        bars_df = bar_builder.get_bars(ticker)
-                        n_bars = bar_builder.get_bar_count(ticker)
+                            bars_df = bar_builder.get_bars(ticker)
+                            n_bars = bar_builder.get_bar_count(ticker)
+                            if n_bars < MIN_BARS:
+                                continue
 
-                        if n_bars < MIN_BARS:
-                            continue
-
-                        # ========== MORNING: EnsembleEngine ==========
-                        if morning:
-                            # 3) Daily bias filter: BEAR -> skip AM
+                            # Daily bias filter: BEAR -> skip AM
                             yf_ticker = ticker_map.get(ticker, f"{ticker}.T")
                             bias = daily_bias.get(yf_ticker, "NEUTRAL")
                             if bias == "BEAR":
-                                # BT: apply_v11_filter sets HOLD on BEAR days
                                 continue
 
                             signal, score, detail = am_engine.evaluate_live(bars_df)
@@ -560,45 +769,91 @@ def main():
                                         print(f"  [{now_str}] [AM] {ticker}: SELL blocked by VWAP (price={current:.0f} > vwap={vwap_val:.0f})")
                                         continue
 
-                                atr_val = calc_atr_from_bars(bars_df, strat_cfg["exit"].get("atr_period", 14))
-                                if atr_val is None:
-                                    atr_val = max(current * 0.01, 1)
+                                # Use RSI-like proxy for priority (AM doesn't have morning_move)
+                                rsi_proxy = 50.0  # default neutral
+                                if "rsi" in bars_df.columns and not pd.isna(bars_df["rsi"].iloc[-1]):
+                                    rsi_proxy = float(bars_df["rsi"].iloc[-1])
+                                priority = calc_priority_score(signal, {"rsi": rsi_proxy, "morning_move": 0.0})
 
-                                sl_dist = atr_val * strat_cfg["exit"]["stop_loss_atr_multiplier"]
-                                sl_dist = max(sl_dist, 1)
-                                tp_dist = sl_dist * strat_cfg["exit"]["take_profit_rr_ratio"]
+                                am_candidates.append((ticker, signal, score, detail, bars_df, bias, priority))
 
-                                risk_per = strat_cfg["global"]["risk_per_trade"]
-                                size = int((am_initial_capital * risk_per) / sl_dist)
-                                size = max((size // 100) * 100, 100)
+                    # Sort AM by priority descending, limit to MAX_ORDERS_PER_CHECK_AM
+                    am_candidates.sort(key=lambda x: x[6], reverse=True)
 
-                                # 5) Total exposure check (BT-aligned)
-                                size = check_total_exposure(
-                                    order_mgr.positions, current, size,
-                                    am_initial_capital, "AM", ticker, now_str)
-                                if size is None:
-                                    continue
+                    am_orders_placed = 0
+                    am_break = False
+                    for (ticker, signal, score, detail, bars_df, bias, priority) in am_candidates:
+                        if am_orders_placed >= MAX_ORDERS_PER_CHECK_AM:
+                            break
+                        if am_break:
+                            break
 
-                                entry_price = current
-                                stop_loss, take_profit, trailing_stop = calc_entry_params(
-                                    signal, entry_price, sl_dist, tp_dist)
+                        current = float(bars_df["close"].iloc[-1])
+                        atr_val = calc_atr_from_bars(bars_df, strat_cfg["exit"].get("atr_period", 14))
+                        if atr_val is None:
+                            atr_val = max(current * 0.01, 1)
 
-                                # BT expected price for comparison
-                                slip = strat_cfg["global"].get("slippage_rate", 0.001)
-                                if signal == "BUY":
-                                    bt_expected = entry_price * (1 + slip)
-                                else:
-                                    bt_expected = entry_price * (1 - slip)
+                        sl_dist = atr_val * strat_cfg["exit"]["stop_loss_atr_multiplier"]
+                        sl_dist = max(sl_dist, 1)
+                        tp_dist = sl_dist * strat_cfg["exit"]["take_profit_rr_ratio"]
 
-                                reason = f"AM Ensemble score={score:.2f} bias={bias} ({detail})"
-                                print(f"  [{now_str}] [AM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
-                                      f"(BT_est={bt_expected:.0f}) SL={stop_loss:.0f} TP={take_profit:.0f} size={size}")
-                                order_mgr.entry(ticker, signal, entry_price, size,
-                                                stop_loss, take_profit, reason,
-                                                session="AM")
+                        risk_per = strat_cfg["global"]["risk_per_trade"]
+                        size = int((am_initial_capital * risk_per) / sl_dist)
+                        size = max((size // 100) * 100, 100)
 
-                        # ========== AFTERNOON: AfternoonReversalEngine ==========
-                        if afternoon:
+                        # Total exposure check (BT-aligned + safety margin)
+                        size = check_total_exposure(
+                            order_mgr.positions, current, size,
+                            am_initial_capital, "AM", ticker, now_str)
+                        if size is None:
+                            continue
+
+                        entry_price = current
+                        stop_loss, take_profit, trailing_stop = calc_entry_params(
+                            signal, entry_price, sl_dist, tp_dist)
+
+                        # Log notional for diagnostics
+                        notional = entry_price * size
+                        raw_cap = am_initial_capital
+                        eff_cap = math.floor(raw_cap * SAFETY_MARGIN_RATIO)
+                        print(f"  [{now_str}] [AM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
+                              f"size={size} notional={notional:,.0f} "
+                              f"(raw_cap={raw_cap:,.0f} effective_cap={eff_cap:,.0f}) "
+                              f"SL={stop_loss:.0f} TP={take_profit:.0f} priority={priority:.2f}")
+
+                        reason = f"AM Ensemble score={score:.2f} bias={bias} ({detail})"
+                        action = execute_entry_with_error_handling(
+                            order_mgr, ticker, signal, entry_price, size,
+                            stop_loss, take_profit, reason, "AM",
+                            blacklist, now_str,
+                        )
+
+                        if action == "break":
+                            am_break = True
+                            break
+                        elif action in ("ok", "retry_ok"):
+                            am_orders_placed += 1
+                        # "skip" -> continue to next candidate
+
+                    # ========================================
+                    # Collect PM candidates
+                    # ========================================
+                    pm_candidates = []  # [(ticker, signal, info, bars_df, priority)]
+                    if afternoon and not am_break:
+                        for ticker in watchlist:
+                            if not order_mgr.can_entry(ticker):
+                                continue
+                            if blacklist.is_blocked(ticker):
+                                # Log skip reason periodically
+                                if signal_check_count % 5 == 1:
+                                    print(f"  [{now_str}] [PM] {ticker}: SKIP (blocked: {blacklist.get_reason(ticker)})")
+                                continue
+
+                            bars_df = bar_builder.get_bars(ticker)
+                            n_bars = bar_builder.get_bar_count(ticker)
+                            if n_bars < MIN_BARS:
+                                continue
+
                             signal, info = pm_engine.evaluate_live(bars_df)
                             rsi_val = info.get("rsi")
                             mm_val = info.get("morning_move")
@@ -607,45 +862,68 @@ def main():
                                 print(f"  [{now_str}] [PM] {ticker}: RSI={rsi_val:.1f} morning_move={mm_val:.1f}% signal={signal}")
 
                             if signal in ("BUY", "SELL"):
-                                current = float(bars_df["close"].iloc[-1])
+                                priority = calc_priority_score(signal, info)
+                                pm_candidates.append((ticker, signal, info, bars_df, priority))
 
-                                pm_exit = afternoon_cfg["exit"]
-                                atr_val = calc_atr_from_bars(bars_df, pm_exit.get("atr_period", 14))
-                                if atr_val is None:
-                                    atr_val = max(current * 0.01, 1)
+                    # Sort PM by priority descending, limit to MAX_ORDERS_PER_CHECK_PM
+                    pm_candidates.sort(key=lambda x: x[4], reverse=True)
 
-                                sl_dist = atr_val * pm_exit["stop_loss_atr_multiplier"]
-                                sl_dist = max(sl_dist, 1)
-                                tp_dist = atr_val * pm_exit["take_profit_atr_multiplier"]
+                    pm_orders_placed = 0
+                    for (ticker, signal, info, bars_df, priority) in pm_candidates:
+                        if pm_orders_placed >= MAX_ORDERS_PER_CHECK_PM:
+                            break
 
-                                pm_global = afternoon_cfg["global"]
-                                risk_per = pm_global["risk_per_trade"]
-                                size = int((pm_initial_capital * risk_per) / sl_dist)
-                                size = max((size // 100) * 100, 100)
+                        current = float(bars_df["close"].iloc[-1])
+                        rsi_val = info.get("rsi")
+                        mm_val = info.get("morning_move")
 
-                                # 5) Total exposure check (BT-aligned)
-                                size = check_total_exposure(
-                                    order_mgr.positions, current, size,
-                                    pm_initial_capital, "PM", ticker, now_str)
-                                if size is None:
-                                    continue
+                        pm_exit = afternoon_cfg["exit"]
+                        atr_val = calc_atr_from_bars(bars_df, pm_exit.get("atr_period", 14))
+                        if atr_val is None:
+                            atr_val = max(current * 0.01, 1)
 
-                                entry_price = current
-                                stop_loss, take_profit, trailing_stop = calc_entry_params(
-                                    signal, entry_price, sl_dist, tp_dist)
+                        sl_dist = atr_val * pm_exit["stop_loss_atr_multiplier"]
+                        sl_dist = max(sl_dist, 1)
+                        tp_dist = atr_val * pm_exit["take_profit_atr_multiplier"]
 
-                                slip = pm_global.get("slippage_rate", 0.001)
-                                if signal == "BUY":
-                                    bt_expected = entry_price * (1 + slip)
-                                else:
-                                    bt_expected = entry_price * (1 - slip)
+                        pm_global = afternoon_cfg["global"]
+                        risk_per = pm_global["risk_per_trade"]
+                        size = int((pm_initial_capital * risk_per) / sl_dist)
+                        size = max((size // 100) * 100, 100)
 
-                                reason = f"PM Reversal RSI={rsi_val:.1f} mm={mm_val:.1f}%"
-                                print(f"  [{now_str}] [PM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
-                                      f"(BT_est={bt_expected:.0f}) SL={stop_loss:.0f} TP={take_profit:.0f} size={size} RSI={rsi_val:.1f}")
-                                order_mgr.entry(ticker, signal, entry_price, size,
-                                                stop_loss, take_profit, reason,
-                                                session="PM")
+                        # Total exposure check (BT-aligned + safety margin)
+                        size = check_total_exposure(
+                            order_mgr.positions, current, size,
+                            pm_initial_capital, "PM", ticker, now_str)
+                        if size is None:
+                            continue
+
+                        entry_price = current
+                        stop_loss, take_profit, trailing_stop = calc_entry_params(
+                            signal, entry_price, sl_dist, tp_dist)
+
+                        # Log notional for diagnostics
+                        notional = entry_price * size
+                        raw_cap = pm_initial_capital
+                        eff_cap = math.floor(raw_cap * SAFETY_MARGIN_RATIO)
+                        print(f"  [{now_str}] [PM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
+                              f"size={size} notional={notional:,.0f} "
+                              f"(raw_cap={raw_cap:,.0f} effective_cap={eff_cap:,.0f}) "
+                              f"SL={stop_loss:.0f} TP={take_profit:.0f} "
+                              f"RSI={rsi_val:.1f} priority={priority:.2f}")
+
+                        reason = f"PM Reversal RSI={rsi_val:.1f} mm={mm_val:.1f}%"
+                        action = execute_entry_with_error_handling(
+                            order_mgr, ticker, signal, entry_price, size,
+                            stop_loss, take_profit, reason, "PM",
+                            blacklist, now_str,
+                        )
+
+                        if action == "break":
+                            break
+                        elif action in ("ok", "retry_ok"):
+                            pm_orders_placed += 1
+                        # "skip" -> continue to next candidate
 
             time.sleep(live_cfg["interval"]["price_check_sec"])
 
