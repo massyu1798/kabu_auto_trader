@@ -1,5 +1,5 @@
 # ============================================
-# 本番設定（v15 BT-aligned）- テンプレート
+# 本番設定（v15.2 BT-aligned + live risk caps）- テンプレート
 # ============================================
 
 api:
@@ -13,7 +13,9 @@ mode:
 
 trade:
   initial_capital: 7000000        # 700万（BT strategy_config.yaml に合わせる）
-  max_positions: 5                # BT strategy_config.global.max_positions に合わせる
+  max_positions: 2                # 本番リスク制約：最大同時ポジション数
+  max_notional_per_position: 3000000  # 本番リスク制約：1ポジあたり最大建玉金額（円）
+  max_total_exposure: 6000000     # 本番リスク制約：合計最大建玉金額（円）
   risk_per_trade: 0.008           # BT strategy_config.global.risk_per_trade に合わせる
   max_daily_loss: 0.03            # BT strategy_config.global.max_daily_loss に合わせる
   margin_type: "day_trade"

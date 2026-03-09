@@ -1,10 +1,11 @@
 """
-JP Stock Auto Trading Bot v15.1 - BT-aligned + API error handling
+JP Stock Auto Trading Bot v15.2 - BT-aligned + API error handling + live risk caps
 - Morning (9:05-11:00): EnsembleEngine (BUY + SELL) + daily bias filter
 - Afternoon (config entry_start-entry_end): AfternoonReversalEngine (BUY + SELL)
 - 5-min OHLCV bars from /board API
 - Screener-based watchlist (same as BT)
 - Short (SELL) position support: symmetric SL/TP/trailing
+- Live risk caps: max_positions, max_notional_per_position, max_total_exposure
 - Total exposure check (BT-aligned) with safety margin
 - Force close: PM at force_close_time, all at market close
 - Cooldown: config-based bars (BT-aligned)
@@ -29,7 +30,7 @@ from backtest.screener import screen_stocks
 # Minimum completed 5-min bars required for signal calculation
 MIN_BARS = 10
 
-VERSION = "v15.1"
+VERSION = "v15.2"
 
 # ============================================
 # Constants for API error handling / throttle
@@ -222,46 +223,93 @@ def calc_atr_from_bars(df: pd.DataFrame, period: int = 14) -> float | None:
 
 
 # ============================================
-# Total exposure check (BT-aligned) + safety margin
+# Live risk caps: per-position + total exposure
 # ============================================
 
-def check_total_exposure(positions: list, new_price: float, new_size: int,
-                         initial_capital: float, session: str, ticker: str,
-                         now_str: str) -> int | None:
-    """
-    BT-aligned total exposure check with safety margin.
-    existing_exposure + new_notional must be <= effective_cap.
-    effective_cap = floor(initial_capital * SAFETY_MARGIN_RATIO).
-    If exceeded, auto-shrink size (Method B). Returns adjusted size or None.
-    """
-    raw_cap = initial_capital
-    effective_cap = math.floor(raw_cap * SAFETY_MARGIN_RATIO)
+def apply_live_risk_caps(
+    positions: list,
+    new_price: float,
+    new_size: int,
+    max_notional_per_position: float,
+    max_total_exposure: float,
+    session: str,
+    ticker: str,
+    now_str: str,
+) -> int | None:
+    """Apply live-only risk caps (per-position notional + total exposure).
 
+    Steps:
+      1) Per-position cap: size = min(size, floor(max_notional_per_position / price))
+      2) Total exposure cap: size = min(size, floor(remaining / price))
+      3) Round down to 100-share lots; skip if < 100.
+
+    Returns adjusted size, or None if the entry should be skipped.
+    """
+    raw_size = new_size
+
+    # --- Step 1: Per-position notional cap ---
+    max_size_per_pos = int(max_notional_per_position / new_price)
+    max_size_per_pos = (max_size_per_pos // 100) * 100
+
+    if max_size_per_pos < 100:
+        print(f"  [{now_str}] [{session}] {ticker}: SKIP "
+              f"(per-position cap {max_notional_per_position:,.0f} too small for price={new_price:.0f})")
+        return None
+
+    if new_size > max_size_per_pos:
+        notional_before = new_price * new_size
+        new_size = max_size_per_pos
+        notional_after = new_price * new_size
+        print(f"  [{now_str}] [{session}] {ticker}: size capped {raw_size} -> {new_size} "
+              f"(per-position cap {max_notional_per_position:,.0f}, "
+              f"notional {notional_before:,.0f} -> {notional_after:,.0f})")
+
+    # --- Step 2: Total exposure cap ---
     existing_exposure = sum(p.entry_price * p.size for p in positions)
-    new_notional = new_price * new_size
-    total = existing_exposure + new_notional
+    remaining = max_total_exposure - existing_exposure
 
-    if total <= effective_cap:
-        return new_size
-
-    # How much room is left?
-    remaining = effective_cap - existing_exposure
     if remaining <= 0:
-        print(f"  [{now_str}] [{session}] {ticker}: SKIP (exposure full) "
-              f"existing={existing_exposure:,.0f} raw_cap={raw_cap:,.0f} effective_cap={effective_cap:,.0f}")
+        print(f"  [{now_str}] [{session}] {ticker}: SKIP (total exposure full) "
+              f"existing={existing_exposure:,.0f} max_total={max_total_exposure:,.0f}")
         return None
 
-    max_size = int(remaining / new_price)
-    max_size = (max_size // 100) * 100
+    max_size_total = int(remaining / new_price)
+    max_size_total = (max_size_total // 100) * 100
 
-    if max_size < 100:
-        print(f"  [{now_str}] [{session}] {ticker}: SKIP (remaining cap too small) "
-              f"remaining={remaining:,.0f} price={new_price:.0f} effective_cap={effective_cap:,.0f}")
+    if max_size_total < 100:
+        print(f"  [{now_str}] [{session}] {ticker}: SKIP (remaining exposure too small) "
+              f"remaining={remaining:,.0f} price={new_price:.0f}")
         return None
 
-    print(f"  [{now_str}] [{session}] {ticker}: size capped {new_size} -> {max_size} "
-          f"(exposure {total:,.0f} > effective_cap {effective_cap:,.0f}, raw_cap={raw_cap:,.0f})")
-    return max_size
+    if new_size > max_size_total:
+        size_before = new_size
+        new_size = max_size_total
+        new_notional = new_price * new_size
+        print(f"  [{now_str}] [{session}] {ticker}: size capped {size_before} -> {new_size} "
+              f"(total exposure cap {max_total_exposure:,.0f}, "
+              f"existing={existing_exposure:,.0f} remaining={remaining:,.0f} "
+              f"notional={new_notional:,.0f})")
+
+    # --- Step 3: Safety margin on top ---
+    effective_cap = math.floor(max_total_exposure * SAFETY_MARGIN_RATIO)
+    total_after = existing_exposure + new_price * new_size
+    if total_after > effective_cap:
+        adj_remaining = effective_cap - existing_exposure
+        if adj_remaining <= 0:
+            print(f"  [{now_str}] [{session}] {ticker}: SKIP (safety margin exceeded) "
+                  f"effective_cap={effective_cap:,.0f}")
+            return None
+        adj_size = int(adj_remaining / new_price)
+        adj_size = (adj_size // 100) * 100
+        if adj_size < 100:
+            print(f"  [{now_str}] [{session}] {ticker}: SKIP (safety margin: remaining too small)")
+            return None
+        if adj_size < new_size:
+            print(f"  [{now_str}] [{session}] {ticker}: size capped {new_size} -> {adj_size} "
+                  f"(safety margin {SAFETY_MARGIN_RATIO}, effective_cap={effective_cap:,.0f})")
+            new_size = adj_size
+
+    return new_size
 
 
 # ============================================
@@ -504,6 +552,14 @@ def main():
     blacklist = TickerBlacklist()
 
     # ================================================
+    # Live risk caps from config (live-only, not BT)
+    # ================================================
+    trade_cfg = live_cfg.get("trade", {})
+    live_max_positions = trade_cfg.get("max_positions", 2)
+    live_max_notional_per_position = float(trade_cfg.get("max_notional_per_position", 3_000_000))
+    live_max_total_exposure = float(trade_cfg.get("max_total_exposure", 6_000_000))
+
+    # ================================================
     # 1) Screener: BT-aligned watchlist
     # ================================================
     use_screener = live_cfg.get("screener", {}).get("enabled", True)
@@ -586,13 +642,17 @@ def main():
     pm_initial_capital = float(afternoon_cfg["global"]["initial_capital"]) if afternoon_cfg else am_initial_capital
 
     print(f"\n{'='*60}")
-    print(f"Bot running... ({VERSION} BT-aligned + error handling)")
+    print(f"Bot running... ({VERSION} BT-aligned + live risk caps)")
     print(f"{'='*60}")
     print(f"  Watchlist: {len(watchlist)} stocks (screener={'ON' if use_screener else 'OFF'})")
     print(f"  AM Initial capital: {am_initial_capital:,.0f}")
     print(f"  PM Initial capital: {pm_initial_capital:,.0f}")
     print(f"  API timeout: {api_timeout}s")
-    print(f"  Safety margin: {SAFETY_MARGIN_RATIO} (effective_cap = raw * {SAFETY_MARGIN_RATIO})")
+    print(f"  Safety margin: {SAFETY_MARGIN_RATIO} (effective = raw * {SAFETY_MARGIN_RATIO})")
+    print(f"  ── Live Risk Caps ──")
+    print(f"    max_positions:              {live_max_positions}")
+    print(f"    max_notional_per_position:  {live_max_notional_per_position:,.0f}")
+    print(f"    max_total_exposure:         {live_max_total_exposure:,.0f}")
     print(f"  Max orders/check: AM={MAX_ORDERS_PER_CHECK_AM} PM={MAX_ORDERS_PER_CHECK_PM}")
     print(f"  Order interval: {ORDER_INTERVAL_SEC}s")
     print(f"  [AM] Entry: 9:05-11:00 | buy_thr={ensemble_cfg['buy_threshold']} sell_thr={ensemble_cfg['sell_threshold']}")
@@ -716,6 +776,9 @@ def main():
                 else:
                     if signal_check_count % 5 == 1:
                         print(f"\n  [{now_str}] === [{session}] Signal Check #{signal_check_count} ===")
+                        print(f"    Positions: {len(order_mgr.positions)}/{live_max_positions} "
+                              f"| Exposure: {sum(p.entry_price*p.size for p in order_mgr.positions):,.0f}"
+                              f"/{live_max_total_exposure:,.0f}")
                         for ticker in watchlist[:15]:  # Show first 15 for brevity
                             n_bars = bar_builder.get_bar_count(ticker)
                             bars_df = bar_builder.get_bars(ticker)
@@ -727,10 +790,20 @@ def main():
                             print(f"    ... and {len(watchlist)-15} more stocks")
 
                     # ========================================
+                    # Max positions gate (live risk cap)
+                    # ========================================
+                    positions_full = len(order_mgr.positions) >= live_max_positions
+
+                    if positions_full:
+                        if signal_check_count % 5 == 1:
+                            print(f"  [{now_str}] Positions full ({len(order_mgr.positions)}"
+                                  f"/{live_max_positions}) - skipping all entries this cycle")
+
+                    # ========================================
                     # Collect AM candidates
                     # ========================================
                     am_candidates = []  # [(ticker, signal, score, detail, bars_df)]
-                    if morning:
+                    if morning and not positions_full:
                         for ticker in watchlist:
                             if not order_mgr.can_entry(ticker):
                                 continue
@@ -787,6 +860,10 @@ def main():
                             break
                         if am_break:
                             break
+                        # Re-check positions limit (may have changed after a successful order)
+                        if len(order_mgr.positions) >= live_max_positions:
+                            print(f"  [{now_str}] [AM] Positions full after {am_orders_placed} orders - stop")
+                            break
 
                         current = float(bars_df["close"].iloc[-1])
                         atr_val = calc_atr_from_bars(bars_df, strat_cfg["exit"].get("atr_period", 14))
@@ -801,10 +878,12 @@ def main():
                         size = int((am_initial_capital * risk_per) / sl_dist)
                         size = max((size // 100) * 100, 100)
 
-                        # Total exposure check (BT-aligned + safety margin)
-                        size = check_total_exposure(
+                        # Live risk caps: per-position + total exposure
+                        size = apply_live_risk_caps(
                             order_mgr.positions, current, size,
-                            am_initial_capital, "AM", ticker, now_str)
+                            live_max_notional_per_position,
+                            live_max_total_exposure,
+                            "AM", ticker, now_str)
                         if size is None:
                             continue
 
@@ -814,11 +893,10 @@ def main():
 
                         # Log notional for diagnostics
                         notional = entry_price * size
-                        raw_cap = am_initial_capital
-                        eff_cap = math.floor(raw_cap * SAFETY_MARGIN_RATIO)
                         print(f"  [{now_str}] [AM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
                               f"size={size} notional={notional:,.0f} "
-                              f"(raw_cap={raw_cap:,.0f} effective_cap={eff_cap:,.0f}) "
+                              f"(per_pos_cap={live_max_notional_per_position:,.0f} "
+                              f"total_cap={live_max_total_exposure:,.0f}) "
                               f"SL={stop_loss:.0f} TP={take_profit:.0f} priority={priority:.2f}")
 
                         reason = f"AM Ensemble score={score:.2f} bias={bias} ({detail})"
@@ -839,7 +917,9 @@ def main():
                     # Collect PM candidates
                     # ========================================
                     pm_candidates = []  # [(ticker, signal, info, bars_df, priority)]
-                    if afternoon and not am_break:
+                    # Re-check positions limit before PM collection
+                    positions_full = len(order_mgr.positions) >= live_max_positions
+                    if afternoon and not am_break and not positions_full:
                         for ticker in watchlist:
                             if not order_mgr.can_entry(ticker):
                                 continue
@@ -872,6 +952,10 @@ def main():
                     for (ticker, signal, info, bars_df, priority) in pm_candidates:
                         if pm_orders_placed >= MAX_ORDERS_PER_CHECK_PM:
                             break
+                        # Re-check positions limit
+                        if len(order_mgr.positions) >= live_max_positions:
+                            print(f"  [{now_str}] [PM] Positions full after {pm_orders_placed} orders - stop")
+                            break
 
                         current = float(bars_df["close"].iloc[-1])
                         rsi_val = info.get("rsi")
@@ -891,10 +975,12 @@ def main():
                         size = int((pm_initial_capital * risk_per) / sl_dist)
                         size = max((size // 100) * 100, 100)
 
-                        # Total exposure check (BT-aligned + safety margin)
-                        size = check_total_exposure(
+                        # Live risk caps: per-position + total exposure
+                        size = apply_live_risk_caps(
                             order_mgr.positions, current, size,
-                            pm_initial_capital, "PM", ticker, now_str)
+                            live_max_notional_per_position,
+                            live_max_total_exposure,
+                            "PM", ticker, now_str)
                         if size is None:
                             continue
 
@@ -904,11 +990,10 @@ def main():
 
                         # Log notional for diagnostics
                         notional = entry_price * size
-                        raw_cap = pm_initial_capital
-                        eff_cap = math.floor(raw_cap * SAFETY_MARGIN_RATIO)
                         print(f"  [{now_str}] [PM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
                               f"size={size} notional={notional:,.0f} "
-                              f"(raw_cap={raw_cap:,.0f} effective_cap={eff_cap:,.0f}) "
+                              f"(per_pos_cap={live_max_notional_per_position:,.0f} "
+                              f"total_cap={live_max_total_exposure:,.0f}) "
                               f"SL={stop_loss:.0f} TP={take_profit:.0f} "
                               f"RSI={rsi_val:.1f} priority={priority:.2f}")
 
