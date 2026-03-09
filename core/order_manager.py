@@ -1,4 +1,4 @@
-"""発注・ポジション管理モジュール (v15: BT-aligned cooldown)"""
+"""発注・ポジション管理モジュール (v15.1: structured order result)"""
 
 import time
 from datetime import datetime, timedelta
@@ -39,7 +39,7 @@ class LiveTrade:
 
 
 class OrderManager:
-    """発注・ポジション管理 (v15: BT-aligned cooldown)"""
+    """発注・ポジション管理 (v15.1: structured order result)"""
 
     def __init__(self, client: KabuClient, config: dict):
         self.client = client
@@ -85,8 +85,15 @@ class OrderManager:
 
     def entry(self, ticker: str, side: str, price: float,
               size: int, stop_loss: float, take_profit: float,
-              reason: str = "", session: str = "") -> bool:
-        """新規エントリー"""
+              reason: str = "", session: str = "") -> dict:
+        """新規エントリー
+
+        Returns:
+            dict: Structured result.
+                Paper mode : {"ok": True}
+                Live success: {"ok": True, "order_id": "..."}
+                Live failure: {"ok": False, "http": <int>, "code": <int>, "message": "..."}
+        """
 
         now = datetime.now()
 
@@ -105,7 +112,7 @@ class OrderManager:
             self.daily_trade_count += 1
             print(f"  📝 [PAPER] {side} {ticker} × {size}株 @ {price:.0f}円")
             print(f"       SL={stop_loss:.0f} TP={take_profit:.0f} | {reason}")
-            return True
+            return {"ok": True}
         else:
             margin_type = 1  # 制度信用
             result = self.client.send_margin_order(
@@ -116,24 +123,28 @@ class OrderManager:
                 order_type=1,  # 成行
                 margin_trade_type=margin_type,
             )
-            if result and result.get("OrderId"):
+
+            if result and result.get("ok"):
                 pos = LivePosition(
                     ticker=ticker, side=side,
                     entry_price=price, entry_time=now,
                     size=size, stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_stop=stop_loss,
-                    order_id=result["OrderId"],
+                    order_id=result.get("order_id", ""),
                     reason=reason,
                     session=session,
                 )
                 self.positions.append(pos)
                 self.daily_trade_count += 1
-                print(f"  🔥 [LIVE] {side} {ticker} × {size}株 | OrderID={result['OrderId']}")
-                return True
+                print(f"  🔥 [LIVE] {side} {ticker} × {size}株 | OrderID={result.get('order_id','')}")
+                return result
             else:
-                print(f"  ❌ 発注失敗: {ticker}")
-                return False
+                # Return the structured error so caller can inspect code
+                print(f"  ❌ 発注失敗: {ticker} code={result.get('code',0) if result else '?'}")
+                if result:
+                    return result
+                return {"ok": False, "http": 0, "code": 0, "message": "no result from api"}
 
     def exit(self, pos: LivePosition, current_price: float, reason: str) -> LiveTrade:
         """ポジション決済"""
