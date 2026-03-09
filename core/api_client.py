@@ -1,12 +1,13 @@
-"""kabu STATION API クライアント (v13: configurable timeout)"""
+"""kabu STATION API クライアント (v13.1: structured order result)"""
 
 import requests
+import json
 import time
 from core.auth import KabuAuth
 
 
 class KabuClient:
-    """kabu STATION REST API ラッ��ー"""
+    """kabu STATION REST API ラッパー"""
 
     def __init__(self, base_url: str, auth: KabuAuth, timeout: int = 10):
         self.base_url = base_url
@@ -14,7 +15,7 @@ class KabuClient:
         self.timeout = timeout
 
     def _get(self, path: str, params: dict = None) -> dict:
-        """GETリク��スト"""
+        """GETリクエスト"""
         headers = self.auth.get_headers()
         if not headers:
             return None
@@ -71,6 +72,49 @@ class KabuClient:
             print(f"  ❌ API 通信エラー: {path} -> {e}")
             return None
 
+    def _post_order(self, path: str, data: dict) -> dict:
+        """POST for /sendorder — returns structured result for error handling.
+
+        Success: {"ok": True, "order_id": "...", "raw": <response_json>}
+        Failure: {"ok": False, "http": <status_code>, "code": <api_code>, "message": "..."}
+        Timeout/Network: {"ok": False, "http": 0, "code": 0, "message": "..."}
+        """
+        headers = self.auth.get_headers()
+        if not headers:
+            return {"ok": False, "http": 0, "code": 0, "message": "no auth headers"}
+        try:
+            res = requests.post(
+                f"{self.base_url}{path}",
+                headers=headers,
+                json=data,
+                timeout=self.timeout,
+            )
+            if res.status_code == 200:
+                body = res.json()
+                return {"ok": True, "order_id": body.get("OrderId", ""), "raw": body}
+
+            # Parse error body
+            api_code = 0
+            api_msg = ""
+            try:
+                err_body = res.json()
+                api_code = err_body.get("Code", 0)
+                api_msg = err_body.get("Message", res.text[:200])
+            except Exception:
+                api_msg = res.text[:200]
+
+            print(f"  ⚠️ /sendorder -> {res.status_code} Code={api_code} {api_msg}")
+            return {"ok": False, "http": res.status_code, "code": api_code, "message": api_msg}
+
+        except requests.exceptions.Timeout:
+            msg = f"timeout ({self.timeout}s)"
+            print(f"  ⚠️ /sendorder タイムアウト: {msg}")
+            return {"ok": False, "http": 0, "code": 0, "message": msg}
+        except Exception as e:
+            msg = str(e)
+            print(f"  ❌ /sendorder 通信エラー: {msg}")
+            return {"ok": False, "http": 0, "code": 0, "message": msg}
+
     # --- 情報取得系 ---
 
     def get_board(self, symbol: str, exchange: int = 1) -> dict:
@@ -108,19 +152,10 @@ class KabuClient:
         margin_trade_type: int = 3,
     ) -> dict:
         """
-        ���用新規注文
+        信用新規注文 — returns structured result.
 
-        Args:
-            symbol: 銘柄コード（例: "7203"）
-            exchange: 市場コード（1=東証）
-            side: "BUY" or "SELL"
-            qty: 注文株数
-            order_type: 1=成行, 2=指値
-            price: 指値価格（成行の場合は0）
-            margin_trade_type: 1=制度信用, 2=一般信用(長期), 3=一般信用(デイトレ)
-
-        Returns:
-            注文結果
+        Success: {"ok": True, "order_id": "...", "raw": {...}}
+        Failure: {"ok": False, "http": <status_code>, "code": <api_code>, "message": "..."}
         """
         side_code = "2" if side == "BUY" else "1"
 
@@ -134,14 +169,14 @@ class KabuClient:
             "MarginTradeType": margin_trade_type,
             "DelivType": 0,
             "FundType": "  ",
-            "AccountType": 4,             # 4=特���
+            "AccountType": 4,             # 4=特定
             "Qty": qty,
             "FrontOrderType": 10 if order_type == 1 else 20,
             "Price": price,
             "ExpireDay": 0,               # 0=当日
         }
 
-        return self._post("/sendorder", data)
+        return self._post_order("/sendorder", data)
 
     def send_margin_close(
         self,
@@ -155,11 +190,7 @@ class KabuClient:
         margin_trade_type: int = 3,
     ) -> dict:
         """
-        ���用返済注文
-
-        Args:
-            side: 建玉と反対のサイド（買建なら"SELL"、売建なら"BUY"）
-            hold_id: 建玉ID
+        信用返済注文
         """
         side_code = "2" if side == "BUY" else "1"
 
