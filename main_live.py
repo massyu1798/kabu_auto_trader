@@ -1,11 +1,12 @@
 """
-JP Stock Auto Trading Bot v15.2 - BT-aligned + API error handling + live risk caps
+JP Stock Auto Trading Bot v15.3 - BT-aligned + API error handling + live risk caps
 - Morning (9:05-11:00): EnsembleEngine (BUY + SELL) + daily bias filter
 - Afternoon (config entry_start-entry_end): AfternoonReversalEngine (BUY + SELL)
 - 5-min OHLCV bars from /board API
 - Screener-based watchlist (same as BT)
 - Short (SELL) position support: symmetric SL/TP/trailing
 - Live risk caps: max_positions, max_notional_per_position, max_total_exposure
+- Configurable margin_trade_type (1=制度, 2=一般, 3=デイトレ)
 - Total exposure check (BT-aligned) with safety margin
 - Force close: PM at force_close_time, all at market close
 - Cooldown: config-based bars (BT-aligned)
@@ -21,7 +22,7 @@ import yfinance as yf
 from datetime import datetime, date as date_type, timedelta
 from core.auth import KabuAuth
 from core.api_client import KabuClient
-from core.order_manager import OrderManager, LivePosition
+from core.order_manager import OrderManager, LivePosition, MARGIN_TRADE_TYPE_LABELS
 from core.bar_builder import BarBuilder
 from strategy.ensemble import EnsembleEngine
 from strategy.afternoon_reversal import AfternoonReversalEngine
@@ -30,7 +31,7 @@ from backtest.screener import screen_stocks
 # Minimum completed 5-min bars required for signal calculation
 MIN_BARS = 10
 
-VERSION = "v15.2"
+VERSION = "v15.3"
 
 # ============================================
 # Constants for API error handling / throttle
@@ -422,8 +423,12 @@ def execute_entry_with_error_handling(
 
     # B) 500 / CODE_MARGIN_BLOCKED -> blacklist EOD
     if code == CODE_MARGIN_BLOCKED:
-        print(f"  ⛔ [{session}] {ticker}: 100368 margin blocked -> block until EOD")
-        blacklist.block_until_eod(ticker, f"100368: {result.get('message','')}")
+        mtt = order_mgr.margin_trade_type
+        mtt_label = MARGIN_TRADE_TYPE_LABELS.get(mtt, "?")
+        print(f"  ⛔ [{session}] {ticker}: 100368 margin blocked "
+              f"(MTT={mtt}={mtt_label}) -> block until EOD")
+        blacklist.block_until_eod(ticker,
+                                  f"100368 MTT={mtt}({mtt_label}): {result.get('message','')}")
         return "skip"
 
     # C) 400 / CODE_ONESHOT_AMOUNT -> 1 shrink retry
@@ -559,6 +564,10 @@ def main():
     live_max_notional_per_position = float(trade_cfg.get("max_notional_per_position", 3_000_000))
     live_max_total_exposure = float(trade_cfg.get("max_total_exposure", 6_000_000))
 
+    # margin_trade_type is read by OrderManager from config
+    live_mtt = order_mgr.margin_trade_type
+    live_mtt_label = MARGIN_TRADE_TYPE_LABELS.get(live_mtt, "?")
+
     # ================================================
     # 1) Screener: BT-aligned watchlist
     # ================================================
@@ -653,6 +662,7 @@ def main():
     print(f"    max_positions:              {live_max_positions}")
     print(f"    max_notional_per_position:  {live_max_notional_per_position:,.0f}")
     print(f"    max_total_exposure:         {live_max_total_exposure:,.0f}")
+    print(f"    margin_trade_type:          {live_mtt} ({live_mtt_label})")
     print(f"  Max orders/check: AM={MAX_ORDERS_PER_CHECK_AM} PM={MAX_ORDERS_PER_CHECK_PM}")
     print(f"  Order interval: {ORDER_INTERVAL_SEC}s")
     print(f"  [AM] Entry: 9:05-11:00 | buy_thr={ensemble_cfg['buy_threshold']} sell_thr={ensemble_cfg['sell_threshold']}")
