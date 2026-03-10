@@ -5,7 +5,8 @@ Purpose:
   Find the correct DelivType + FundType combination for cash buy orders.
   Verified: manual order via kabu STATION works (4063, market, specific account).
 
-Tests all DelivType x FundType combinations and stops on first success.
+Tests all DelivType x FundType combinations with rate-limit delay.
+Stops on first success.
 
 WARNING:
   REAL orders on PRODUCTION port. Cancel via kabu STATION if accepted.
@@ -14,6 +15,7 @@ WARNING:
 import requests
 import json
 import sys
+import time
 import yaml
 
 # ============================================
@@ -37,18 +39,22 @@ except KeyError as e:
 # DelivType x FundType combinations to try
 # ============================================
 COMBOS = [
-    (2, "  ", "DelivType=2(預り金) FundType='  '(自動)"),
     (2, "AA", "DelivType=2(預り金) FundType='AA'(信用代用)"),
+    (2, "  ", "DelivType=2(預り金) FundType='  '(自動)"),
     (2, "02", "DelivType=2(預り金) FundType='02'(保護預り)"),
-    (0, "  ", "DelivType=0(自動)   FundType='  '(自動)"),
     (0, "AA", "DelivType=0(自動)   FundType='AA'(信用代用)"),
     (0, "02", "DelivType=0(自動)   FundType='02'(保護預り)"),
+    (0, "  ", "DelivType=0(自動)   FundType='  '(自動)"),
 ]
+
+# Delay between requests to avoid 4001006 rate limit
+REQUEST_DELAY_SEC = 3.0
 
 
 def main():
     print("=" * 60)
     print("  Minimal Spot Buy Test: 4063 (信越化学工業)")
+    print(f"  Delay between requests: {REQUEST_DELAY_SEC}s (rate limit avoidance)")
     print("=" * 60)
 
     # --- Token ---
@@ -82,6 +88,12 @@ def main():
     print(f"\n  Testing {len(COMBOS)} DelivType x FundType combinations...\n")
 
     for i, (deliv, fund, desc) in enumerate(COMBOS, 1):
+
+        # Rate limit delay (skip before first request)
+        if i > 1:
+            print(f"  ⏳ Waiting {REQUEST_DELAY_SEC}s (rate limit avoidance)...")
+            time.sleep(REQUEST_DELAY_SEC)
+
         body = {
             "Password": API_PASSWORD,
             "Symbol": "4063",
@@ -98,7 +110,6 @@ def main():
             "ExpireDay": 0,
         }
 
-        # Log without password
         print(f"  [{i}/{len(COMBOS)}] {desc}")
 
         try:
@@ -121,15 +132,52 @@ def main():
             print(f"         ✅ SUCCESS — OrderId: {order_id}")
             print(f"\n  🎯 Correct combination found!")
             print(f"     DelivType = {deliv}")
-            print(f"     FundType  = \"{fund}\"")
+            fund_display = "'  ' (two half-width spaces)" if fund.strip() == "" else f"'{fund}'"
+            print(f"     FundType  = {fund_display}")
             print(f"\n  ⚠️  REAL ORDER PLACED! Cancel via kabu STATION immediately!")
             return
         else:
-            print(f"         ❌ Code={code} {msg}\n")
+            print(f"         ❌ Code={code} {msg}")
+
+            # If rate limited, wait extra and retry this same combo
+            if code == 4001006:
+                print(f"         ⏳ Rate limited. Waiting 10s and retrying...")
+                time.sleep(10)
+                try:
+                    res2 = requests.post(
+                        f"{BASE_URL}/sendorder",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json=body,
+                        timeout=15,
+                    )
+                    data2 = res2.json() if res2.text else {}
+                except Exception as e2:
+                    print(f"         ❌ Retry error: {e2}\n")
+                    continue
+
+                code2 = data2.get("Code", 0)
+                order_id2 = data2.get("OrderId")
+                msg2 = data2.get("Message", "")
+
+                if res2.status_code == 200 and order_id2:
+                    print(f"         ✅ RETRY SUCCESS — OrderId: {order_id2}")
+                    print(f"\n  🎯 Correct combination found!")
+                    print(f"     DelivType = {deliv}")
+                    fund_display = "'  ' (two half-width spaces)" if fund.strip() == "" else f"'{fund}'"
+                    print(f"     FundType  = {fund_display}")
+                    print(f"\n  ⚠️  REAL ORDER PLACED! Cancel via kabu STATION immediately!")
+                    return
+                else:
+                    print(f"         ❌ Retry: Code={code2} {msg2}")
+
+            print()
 
     # All failed
-    print("  ❌ All combinations failed.")
-    print("     Check account balance or try during market hours.")
+    print("\n  ❌ All combinations failed.")
+    print("     Possible causes:")
+    print("     - Insufficient cash balance for spot buy (~610,000 JPY needed)")
+    print("     - Account does not allow spot trading via API")
+    print("     - Try during market hours if not already")
 
     print("\n" + "=" * 60)
     print("  Test complete.")
