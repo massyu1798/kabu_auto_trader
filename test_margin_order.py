@@ -1,0 +1,232 @@
+"""
+Margin New-Open order test — sendorder diagnosis tool
+
+Purpose:
+  Determine which margin trade types are available for CashMargin=2 (new open).
+  Uses the EXACT same payload structure as api_client.py send_margin_order().
+
+Tests:
+  1. MarginTradeType=1 (制度信用)   — the most common margin type
+  2. MarginTradeType=3 (デイトレ)   — day-trade margin (your main config)
+
+Interpretation:
+  - OrderId returned     → that margin type works
+  - Code=100368          → that margin type is blocked
+  - Other error          → parameter or market issue
+
+WARNING:
+  This script places REAL margin orders on PRODUCTION port (18080).
+  If an order succeeds, cancel it via kabu STATION immediately.
+  Uses smallest practical lot (100 shares) with a cheap symbol.
+"""
+
+import requests
+import json
+import sys
+
+# ============================================
+# Configuration — matches api_client.py exactly
+# ============================================
+API_PASSWORD = "179825519"
+BASE_URL = "http://localhost:18080/kabusapi"
+
+# Use a lower-priced symbol to minimize margin requirement
+# 8306 = MUFG (三菱UFJ) — typically ~1,500-2,500 JPY range
+TEST_SYMBOL = "8306"
+TEST_EXCHANGE = 1       # Tokyo Stock Exchange
+TEST_SIDE = "2"         # "2" = BUY
+TEST_QTY = 100          # Minimum lot
+
+# MarginTradeType candidates
+MTT_CANDIDATES = [
+    (1, "制度信用"),
+    (3, "一般信用(デイトレ)"),
+]
+
+
+def get_token():
+    """Obtain API token."""
+    try:
+        res = requests.post(
+            f"{BASE_URL}/token",
+            json={"APIPassword": API_PASSWORD},
+            timeout=10,
+        )
+        if res.status_code == 200:
+            return res.json().get("Token")
+        print(f"  ❌ Token failed: {res.status_code} {res.text[:200]}")
+        return None
+    except Exception as e:
+        print(f"  ❌ Token error: {e}")
+        return None
+
+
+def get_current_price(token, symbol):
+    """Fetch current price for display."""
+    headers = {"X-API-KEY": token}
+    try:
+        res = requests.get(
+            f"{BASE_URL}/board/{symbol}@{TEST_EXCHANGE}",
+            headers=headers,
+            timeout=10,
+        )
+        if res.status_code == 200:
+            data = res.json()
+            return data.get("CurrentPrice"), data.get("SymbolName")
+    except Exception:
+        pass
+    return None, None
+
+
+def send_margin_new_order(token, margin_trade_type):
+    """Send margin new-open order — EXACT same structure as api_client.py."""
+    headers = {"X-API-KEY": token, "Content-Type": "application/json"}
+
+    # *** This matches api_client.py send_margin_order() exactly ***
+    body = {
+        "Password": API_PASSWORD,
+        "Symbol": TEST_SYMBOL,
+        "Exchange": TEST_EXCHANGE,
+        "SecurityType": 1,              # 1 = Stock
+        "Side": TEST_SIDE,              # "2" = Buy
+        "CashMargin": 2,               # 2 = Margin New Open (信用新規)
+        "MarginTradeType": margin_trade_type,
+        "DelivType": 0,                # 0 = auto (for margin)
+        "FundType": "  ",              # "  " = auto (two half-width spaces)
+        "AccountType": 4,              # 4 = Specific account (特定口座)
+        "Qty": TEST_QTY,
+        "FrontOrderType": 10,          # 10 = Market order (成行)
+        "Price": 0,                    # 0 for market order
+        "ExpireDay": 0,                # 0 = Today
+    }
+
+    print(f"\n  📤 POST {BASE_URL}/sendorder")
+    # Log payload without password
+    log_body = {k: v for k, v in body.items() if k != "Password"}
+    print(f"     {json.dumps(log_body, ensure_ascii=False)}")
+
+    try:
+        res = requests.post(
+            f"{BASE_URL}/sendorder",
+            headers=headers,
+            json=body,
+            timeout=15,
+        )
+        return res
+    except requests.Timeout:
+        print("  ❌ Timeout (15s)")
+        return None
+    except requests.ConnectionError:
+        print("  ❌ Connection error — is kabu STATION running?")
+        return None
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+        return None
+
+
+def main():
+    print("=" * 60)
+    print("  sendorder Diagnosis: Margin New Open (CashMargin=2)")
+    print("=" * 60)
+    print(f"\n  Symbol:  {TEST_SYMBOL}")
+    print(f"  Side:    BUY")
+    print(f"  Qty:     {TEST_QTY} shares")
+    print(f"  Order:   Market (成行)")
+    print(f"  Tests:   {len(MTT_CANDIDATES)} MarginTradeType patterns")
+
+    # --- Step 1: Token ---
+    print(f"\n■ Step 1: Obtain API token")
+    print("-" * 40)
+    token = get_token()
+    if not token:
+        print("  Cannot proceed. Exiting.")
+        sys.exit(1)
+    print(f"  ✅ Token: {token[:10]}...")
+
+    # --- Step 2: Current price ---
+    print(f"\n■ Step 2: Fetch current price of {TEST_SYMBOL}")
+    print("-" * 40)
+    price, name = get_current_price(token, TEST_SYMBOL)
+    if price:
+        print(f"  ✅ {name}  price: {price:,.0f} JPY")
+        est_margin = price * TEST_QTY * 0.3  # Approx 30% margin
+        print(f"  💰 Estimated margin req: ~{est_margin:,.0f} JPY (100 shares)")
+    else:
+        print(f"  ⚠️  Could not fetch price")
+
+    # --- Step 3: Try each MarginTradeType ---
+    print(f"\n■ Step 3: Test margin new-open orders")
+    print("=" * 60)
+
+    results = []  # [(mtt, mtt_label, success, code, message)]
+
+    for mtt, mtt_label in MTT_CANDIDATES:
+        print(f"\n  ── MarginTradeType={mtt} ({mtt_label}) ──")
+
+        res = send_margin_new_order(token, mtt)
+        if res is None:
+            results.append((mtt, mtt_label, False, 0, "No response"))
+            continue
+
+        print(f"\n  📥 Status: {res.status_code}")
+        try:
+            data = res.json()
+            print(f"     Body: {json.dumps(data, ensure_ascii=False)}")
+        except Exception:
+            print(f"     Raw: {res.text[:300]}")
+            data = {}
+
+        order_id = data.get("OrderId")
+        code = data.get("Code", 0)
+        message = data.get("Message", "")
+
+        if res.status_code == 200 and order_id:
+            print(f"\n  ✅ ORDER ACCEPTED — OrderId: {order_id}")
+            print(f"     MTT={mtt} ({mtt_label}) WORKS!")
+            print(f"\n  ⚠️  REAL ORDER PLACED! Cancel via kabu STATION immediately!")
+            results.append((mtt, mtt_label, True, 0, f"OrderId={order_id}"))
+        else:
+            print(f"\n  ❌ REJECTED — Code={code} {message}")
+            results.append((mtt, mtt_label, False, code, message))
+
+            # If 100368 (margin blocked), continue to try next type
+            if code == 100368:
+                print(f"     → Code 100368: margin new-open is BLOCKED for MTT={mtt}")
+
+    # --- Step 4: Summary ---
+    print(f"\n\n■ Step 4: Diagnosis Summary")
+    print("=" * 60)
+
+    any_success = any(r[2] for r in results)
+    any_100368 = any(r[3] == 100368 for r in results)
+
+    for mtt, mtt_label, success, code, message in results:
+        status = "✅ OK" if success else f"❌ Code={code}"
+        print(f"  MTT={mtt} ({mtt_label:12s}): {status}  {message}")
+
+    print()
+
+    if any_success:
+        ok_types = [f"MTT={r[0]}({r[1]})" for r in results if r[2]]
+        ng_types = [f"MTT={r[0]}({r[1]})" for r in results if not r[2]]
+        print(f"  ✅ Working types: {', '.join(ok_types)}")
+        if ng_types:
+            print(f"  ❌ Blocked types: {', '.join(ng_types)}")
+        print(f"\n  👉 Update live_config.yaml: margin_trade_type to a working value.")
+        print(f"     Cancel any test orders via kabu STATION!")
+    elif any_100368:
+        print(f"  ❌ All tested margin types returned Code=100368 (blocked).")
+        print(f"     → Margin new-open via API is restricted on this account.")
+        print(f"     → Check auカブコム証券 account settings / API permissions.")
+        print(f"     → Contact auカブコム support if needed.")
+    else:
+        print(f"  ❌ All attempts failed with non-100368 errors.")
+        print(f"     → Review error codes above for details.")
+
+    print("\n" + "=" * 60)
+    print("  Diagnosis complete.")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
