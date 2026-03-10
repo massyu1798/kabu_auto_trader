@@ -1,5 +1,5 @@
 # ============================================
-# 本番設定（v17.1 spec-aligned margin orders）- テンプレート
+# 本番設定（v18.0 multi-lot hold_entries + spec-aligned margin）- テンプレート
 # ============================================
 
 api:
@@ -25,7 +25,7 @@ trade:
   # test_margin_order.py で事前検証してから設定してください
   margin_trade_type: 3
 
-# 信用注文パラメータ（v17.1）
+# 信用注文パラメータ（v18.0）
 # 以下は api_client.py のデフォルト値として組み込み済みです。
 # 通常は変更不要ですが、参考として記載しています。
 #
@@ -40,9 +40,12 @@ trade:
 #   fund_type: "11"       # 資産区分: 信用取引
 #   account_type: 4       # 口座種別: 特定口座
 #
-# 返済注文の Exchange は /positions の実建玉 Exchange を自動使用します。
+# 返済注文の Exchange は 27 (東証+) に統一されます。
+# 返済注文の ClosePositions には複数建玉 (分割約定) も自動対応します。
+# HoldID は /positions の ExecutionID を使用します。
 # issue #1072: Exchange=1 で建てた建玉は Exchange=1 でのみ返済可。
 #              Exchange=27 で建てた建玉は Exchange=27 でのみ返済可。
+#              本システムは新規・返済ともに Exchange=27 を使用します。
 
 # 現物（spot）注文設定
 # test_spot_minimal.py で正しい組み合わせを特定してから設定してください
