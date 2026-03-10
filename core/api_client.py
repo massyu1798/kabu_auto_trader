@@ -1,4 +1,4 @@
-"""kabu STATION API client (v16.0: fix double-request, spot order hardening)"""
+"""kabu STATION API client (v16.1: Exchange=27 for orders, FundType='02' required)"""
 
 import requests
 import json
@@ -13,8 +13,13 @@ _ORDER_LOG_FIELDS = [
     "Qty", "FrontOrderType", "Price", "ExpireDay",
 ]
 
-# Known Exchange candidates for TSE-listed stocks
-_EXCHANGE_CANDIDATES = [1, 3, 5, 6]
+# Exchange candidates for /symbol info queries
+_SYMBOL_EXCHANGE_CANDIDATES = [1, 3, 5, 6]
+
+# Exchange candidates for /sendorder
+# 27 = 東証+ (required during normal trading hours)
+#  1 = 東証  (only when SOR/東証+ is in maintenance)
+_ORDER_EXCHANGE_CANDIDATES = [27, 1]
 
 # Error classification map
 _ERROR_CATEGORIES = {
@@ -167,21 +172,35 @@ class KabuClient:
     def find_exchange(self, symbol: str) -> int:
         """Identify the correct Exchange code for a symbol by querying /symbol.
 
-        Tries candidates in order (1=TSE, 3=Nagoya, 5=Fukuoka, 6=Sapporo).
-        Returns the first successful Exchange code, or 1 as fallback.
-        Logs Exchange, DisplayName, and TradingUnit on success.
+        This is for INFO queries (/symbol, /board). Returns 1 (TSE) typically.
+        For ORDER Exchange, use find_order_exchange() instead.
         """
-        for ex in _EXCHANGE_CANDIDATES:
+        for ex in _SYMBOL_EXCHANGE_CANDIDATES:
             res = self.get_symbol(symbol, ex)
             if res and res.get("Symbol") == symbol:
                 display = res.get("DisplayName", "?")
                 unit = res.get("TradingUnit", "?")
                 resolved_ex = res.get("Exchange", ex)
-                print(f"  ✅ Exchange resolved: {symbol} -> Exchange={resolved_ex}"
+                print(f"  ✅ Exchange resolved (info): {symbol} -> Exchange={resolved_ex}"
                       f" ({display}) TradingUnit={unit}")
                 return resolved_ex
         print(f"  ⚠️ Could not determine Exchange for {symbol}. Falling back to 1.")
         return 1
+
+    def find_order_exchange(self, symbol: str) -> int:
+        """Determine the correct Exchange for /sendorder.
+
+        During normal trading hours, new orders require Exchange=27 (東証+).
+        Exchange=1 (東証) is only available when SOR/東証+ is in maintenance.
+
+        Returns: 27 (preferred) or 1 (fallback).
+        """
+        # We can't easily test sendorder to determine exchange,
+        # so we return 27 as default and let the caller fall back to 1
+        # if 100378 is returned.
+        print(f"  ✅ Order Exchange: defaulting to 27 (東証+) for {symbol}")
+        print(f"     (Fallback to 1 if 100378 occurs)")
+        return 27
 
     def get_board(self, symbol: str, exchange: int = 1) -> dict:
         """Board info"""
@@ -250,21 +269,23 @@ class KabuClient:
         order_type: int = 1,
         price: float = 0,
         deliv_type: int = 2,
-        fund_type: str = None,
+        fund_type: str = "02",
     ) -> dict:
         """Spot (cash) order (CashMargin=1).
 
-        Builds a minimal payload for spot orders. Key rules:
+        Builds a minimal payload for spot orders. Key rules per API spec:
         - CashMargin=1 (always)
+        - Exchange: 27 (東証+) during normal hours, 1 (東証) during maintenance
         - DelivType: 2=預り金 (standard for spot buy)
-        - FundType: only included when explicitly set (not empty/spaces)
+        - FundType: '02'=保護預り (REQUIRED — omitting causes 4001005)
+        - AccountType: 4=特定口座
         - MarginTradeType: NEVER included (spot-only)
-        - No empty-string or whitespace-only fields (avoids 4001005)
+        - No empty-string or whitespace-only fields
 
         Args:
             deliv_type: 2=預り金 (default, standard)
-            fund_type:  '02'=保護預り, 'AA'=信用代用, etc.
-                        None = omit from payload (let API default).
+            fund_type:  '02'=保護預り (default, proven working for AccountType=4)
+                        'AA'=信用代用
         """
         side_code = "2" if side == "BUY" else "1"
 
@@ -276,6 +297,7 @@ class KabuClient:
             "Side": side_code,
             "CashMargin": 1,
             "DelivType": deliv_type,
+            "FundType": fund_type,
             "AccountType": 4,
             "Qty": qty,
             "FrontOrderType": 10 if order_type == 1 else 20,
@@ -283,9 +305,9 @@ class KabuClient:
             "ExpireDay": 0,
         }
 
-        # Only include FundType when explicitly set with a non-blank value
-        if fund_type is not None and str(fund_type).strip():
-            data["FundType"] = fund_type
+        # Safety: strip whitespace-only FundType (causes 4001005)
+        if not str(data.get("FundType", "")).strip():
+            data["FundType"] = "02"
 
         return self._post_order("/sendorder", data)
 
