@@ -23,12 +23,24 @@ WARNING:
 import requests
 import json
 import sys
+import yaml
 
 # ============================================
-# Configuration — matches api_client.py exactly
+# Load config (password from live_config.yaml)
 # ============================================
-API_PASSWORD = "179825519"
-BASE_URL = "http://localhost:18080/kabusapi"
+CONFIG_PATH = "config/live_config.yaml"
+
+try:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        _cfg = yaml.safe_load(f)
+    API_PASSWORD = _cfg["api"]["password"]
+    BASE_URL = _cfg["api"]["base_url"]
+except FileNotFoundError:
+    print(f"  ❌ {CONFIG_PATH} not found. Copy from live_config.example.yaml first.")
+    sys.exit(1)
+except KeyError as e:
+    print(f"  ❌ Missing key in {CONFIG_PATH}: {e}")
+    sys.exit(1)
 
 # Use a lower-priced symbol to minimize margin requirement
 # 8306 = MUFG (三菱UFJ) — typically ~1,500-2,500 JPY range
