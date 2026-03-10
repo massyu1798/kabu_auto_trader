@@ -25,12 +25,24 @@ WARNING:
 import requests
 import json
 import sys
+import yaml
 
 # ============================================
-# Configuration
+# Load config (password from live_config.yaml)
 # ============================================
-API_PASSWORD = "179825519"
-BASE_URL = "http://localhost:18080/kabusapi"
+CONFIG_PATH = "config/live_config.yaml"
+
+try:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        _cfg = yaml.safe_load(f)
+    API_PASSWORD = _cfg["api"]["password"]
+    BASE_URL = _cfg["api"]["base_url"]
+except FileNotFoundError:
+    print(f"  ❌ {CONFIG_PATH} not found. Copy from live_config.example.yaml first.")
+    sys.exit(1)
+except KeyError as e:
+    print(f"  ❌ Missing key in {CONFIG_PATH}: {e}")
+    sys.exit(1)
 
 # Order parameters
 SYMBOL = "4063"         # Shin-Etsu Chemical
@@ -102,7 +114,9 @@ def send_cash_buy_order(token, fund_type):
     print(f"\n  📤 Sending order request...")
     print(f"     POST {BASE_URL}/sendorder")
     print(f"     FundType = \"{fund_type}\"")
-    print(f"     Body: {json.dumps(body, indent=6, ensure_ascii=False)}")
+    # Log payload without password
+    log_body = {k: v for k, v in body.items() if k != "Password"}
+    print(f"     Body: {json.dumps(log_body, indent=6, ensure_ascii=False)}")
 
     try:
         res = requests.post(
