@@ -6,6 +6,7 @@ Purpose:
   Verified: manual order via kabu STATION works (4063, market, specific account).
 
 Tests all DelivType x FundType combinations with rate-limit delay.
+Re-acquires token before each sendorder (kabuS may invalidate token on error).
 Stops on first success.
 
 WARNING:
@@ -51,26 +52,34 @@ COMBOS = [
 REQUEST_DELAY_SEC = 3.0
 
 
-def main():
-    print("=" * 60)
-    print("  Minimal Spot Buy Test: 4063 (信越化学工業)")
-    print(f"  Delay between requests: {REQUEST_DELAY_SEC}s (rate limit avoidance)")
-    print("=" * 60)
-
-    # --- Token ---
+def get_token():
+    """Obtain a fresh API token."""
     try:
         res = requests.post(
             f"{BASE_URL}/token",
             json={"APIPassword": API_PASSWORD},
             timeout=10,
         )
-        token = res.json().get("Token") if res.status_code == 200 else None
+        if res.status_code == 200:
+            return res.json().get("Token")
+        print(f"    ⚠️ Token refresh failed: {res.status_code} {res.text[:100]}")
+        return None
     except Exception as e:
-        print(f"  ❌ Token error: {e}")
-        sys.exit(1)
+        print(f"    ⚠️ Token refresh error: {e}")
+        return None
 
+
+def main():
+    print("=" * 60)
+    print("  Minimal Spot Buy Test: 4063 (信越化学工業)")
+    print(f"  Delay between requests: {REQUEST_DELAY_SEC}s")
+    print(f"  Token: re-acquired before EACH sendorder")
+    print("=" * 60)
+
+    # --- Initial token (for board query only) ---
+    token = get_token()
     if not token:
-        print("  ❌ Token failed.")
+        print("  ❌ Initial token failed.")
         sys.exit(1)
     print(f"  ✅ Token: {token[:10]}...")
 
@@ -91,8 +100,15 @@ def main():
 
         # Rate limit delay (skip before first request)
         if i > 1:
-            print(f"  ⏳ Waiting {REQUEST_DELAY_SEC}s (rate limit avoidance)...")
+            print(f"  ⏳ Waiting {REQUEST_DELAY_SEC}s...")
             time.sleep(REQUEST_DELAY_SEC)
+
+        # Re-acquire token before each sendorder
+        token = get_token()
+        if not token:
+            print(f"  [{i}/{len(COMBOS)}] {desc}")
+            print(f"         ❌ Could not get token. Skipping.\n")
+            continue
 
         body = {
             "Password": API_PASSWORD,
@@ -115,7 +131,7 @@ def main():
         try:
             res = requests.post(
                 f"{BASE_URL}/sendorder",
-                headers={**headers, "Content-Type": "application/json"},
+                headers={"X-API-KEY": token, "Content-Type": "application/json"},
                 json=body,
                 timeout=15,
             )
@@ -139,14 +155,18 @@ def main():
         else:
             print(f"         ❌ Code={code} {msg}")
 
-            # If rate limited, wait extra and retry this same combo
+            # If rate limited, wait extra and retry
             if code == 4001006:
                 print(f"         ⏳ Rate limited. Waiting 10s and retrying...")
                 time.sleep(10)
+                token = get_token()
+                if not token:
+                    print(f"         ❌ Token failed on retry.\n")
+                    continue
                 try:
                     res2 = requests.post(
                         f"{BASE_URL}/sendorder",
-                        headers={**headers, "Content-Type": "application/json"},
+                        headers={"X-API-KEY": token, "Content-Type": "application/json"},
                         json=body,
                         timeout=15,
                     )
