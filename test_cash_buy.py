@@ -85,7 +85,7 @@ def send_cash_buy_order(token):
         "Side": SIDE,           # "2" = Buy
         "CashMargin": CASH_MARGIN,  # 1 = Cash (SPOT) — NOT margin
         "DelivType": 2,         # 2 = Cash delivery (for spot buy)
-        "FundType": "  ",       # Auto
+        "FundType": "02",       # "02" = Custody (保護預り) — required for cash orders
         "AccountType": 4,       # 4 = Specific account (特定口座)
         "Qty": QTY,
         "FrontOrderType": 10,   # 10 = Market order (成行)
