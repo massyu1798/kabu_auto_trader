@@ -263,7 +263,6 @@ class OrderManager:
         """Build ClosePositions list from hold_entries for the requested close_qty.
 
         Allocates lots in order until close_qty is fulfilled.
-        Exchange is forced to 27 for all entries (unified rule).
 
         Returns:
             (close_positions_list, consumed) or (None, None) if insufficient qty.
@@ -291,6 +290,26 @@ class OrderManager:
 
         return close_positions, consumed
 
+    @staticmethod
+    def _resolve_close_exchange(hold_entries: list) -> tuple[int | None, str]:
+        """Determine Exchange for close order from hold_entries.
+
+        Returns:
+            (exchange, error_message)
+            - If all entries share the same Exchange: (exchange_value, "")
+            - If Exchanges are mixed: (None, error_description)
+            - If no entries: (None, error_description)
+        """
+        if not hold_entries:
+            return None, "no hold_entries"
+
+        exchanges = set(e.exchange for e in hold_entries)
+        if len(exchanges) == 1:
+            return exchanges.pop(), ""
+        else:
+            ex_str = ", ".join(str(ex) for ex in sorted(exchanges))
+            return None, f"mixed Exchanges in hold_entries: {{{ex_str}}}"
+
     def exit(self, pos: LivePosition, current_price: float, reason: str) -> LiveTrade:
         """Close position.
 
@@ -298,7 +317,8 @@ class OrderManager:
         - Builds ClosePositions from multiple hold_entries
         - Only removes local position if API close succeeds
         - Uses hold_entries (ExecutionIDs) from /positions
-        - Exchange is unified to 27 (東証+) for close orders
+        - Exchange is derived from hold_entries (must be uniform across all lots)
+        - If hold_entries have mixed Exchanges, close is refused (error)
         - DelivType=0 for new-open, DelivType=2 for close (asymmetric rule)
         """
 
@@ -345,8 +365,13 @@ class OrderManager:
 
             close_side = "SELL" if pos.side == "BUY" else "BUY"
 
-            # Exchange unified to 27 (東証+) for close orders
-            close_exchange = 27
+            # Derive Exchange from hold_entries (must be uniform)
+            close_exchange, ex_error = self._resolve_close_exchange(pos.hold_entries)
+            if close_exchange is None:
+                print(f"  ❌ [LIVE] Cannot close {pos.ticker}: {ex_error}")
+                print(f"     Position remains open. Manual intervention required.")
+                # DO NOT remove from self.positions — mixed Exchange
+                return trade
 
             close_result = self.client.send_margin_close(
                 symbol=pos.ticker,
