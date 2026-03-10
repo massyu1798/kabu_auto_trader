@@ -1,4 +1,4 @@
-"""Order / position manager (v15.4: dynamic exchange from board)"""
+"""Order / position manager (v17.0: hold_id from /positions, spec-aligned close)"""
 
 import time
 from datetime import datetime, timedelta
@@ -12,6 +12,13 @@ MARGIN_TRADE_TYPE_LABELS = {
     3: "一般(デイトレ)",
 }
 
+# Delay (seconds) before polling /positions after new order accepted
+_FILL_POLL_DELAY = 2.0
+# Max attempts to poll for fill
+_FILL_POLL_MAX = 5
+# Interval between poll attempts
+_FILL_POLL_INTERVAL = 1.5
+
 
 @dataclass
 class LivePosition:
@@ -24,9 +31,11 @@ class LivePosition:
     stop_loss: float
     take_profit: float
     trailing_stop: float
-    exchange: int = 1      # board-derived exchange code
-    hold_id: str = ""      # kabu API hold ID
-    order_id: str = ""     # order ID
+    exchange: int = 1      # board-derived exchange code (for INFO queries)
+    order_exchange: int = 27  # exchange used in /sendorder (for close order)
+    hold_id: str = ""      # ExecutionID from /positions (for ClosePositions)
+    position_exchange: int = 0  # Exchange from /positions (for close order)
+    order_id: str = ""     # order ID from sendorder response
     reason: str = ""
     session: str = ""      # "AM" or "PM"
 
@@ -47,7 +56,7 @@ class LiveTrade:
 
 
 class OrderManager:
-    """Order / position manager (v15.4: dynamic exchange)"""
+    """Order / position manager (v17.0: hold_id + spec-aligned close)"""
 
     def __init__(self, client: KabuClient, config: dict):
         self.client = client
@@ -86,14 +95,41 @@ class OrderManager:
                 return False
         return True
 
+    def _poll_hold_id(self, ticker: str, side: str) -> tuple[str, int]:
+        """Poll /positions to resolve hold_id (ExecutionID) after order fill.
+
+        Returns:
+            (hold_id, position_exchange) or ("", 0) if not found.
+        """
+        time.sleep(_FILL_POLL_DELAY)
+
+        for attempt in range(1, _FILL_POLL_MAX + 1):
+            hold_infos = self.client.resolve_position_hold_ids(ticker, side)
+            if hold_infos:
+                # Use the latest (last) position entry
+                info = hold_infos[-1]
+                hold_id = info["hold_id"]
+                pos_exchange = info["exchange"]
+                print(f"  ✅ hold_id resolved: {ticker} -> ExecutionID={hold_id} "
+                      f"Exchange={pos_exchange} (attempt {attempt})")
+                return hold_id, pos_exchange
+
+            if attempt < _FILL_POLL_MAX:
+                print(f"  ⏳ hold_id not yet available for {ticker} "
+                      f"(attempt {attempt}/{_FILL_POLL_MAX})")
+                time.sleep(_FILL_POLL_INTERVAL)
+
+        print(f"  ⚠️ hold_id NOT resolved for {ticker} after {_FILL_POLL_MAX} attempts")
+        return "", 0
+
     def entry(self, ticker: str, side: str, price: float,
               size: int, stop_loss: float, take_profit: float,
               reason: str = "", session: str = "",
-              exchange: int = 1) -> dict:
+              exchange: int = 27) -> dict:
         """New entry.
 
         Args:
-            exchange: board-derived exchange code (NOT hardcoded).
+            exchange: Exchange for /sendorder new-open (27=東証+ by default).
 
         Returns:
             dict: Structured result.
@@ -109,7 +145,9 @@ class OrderManager:
                 take_profit=take_profit,
                 trailing_stop=stop_loss,
                 exchange=exchange,
+                order_exchange=exchange,
                 hold_id=f"PAPER_{ticker}_{int(time.time())}",
+                position_exchange=exchange,
                 reason=reason,
                 session=session,
             )
@@ -126,7 +164,7 @@ class OrderManager:
 
             result = self.client.send_margin_order(
                 symbol=ticker,
-                exchange=exchange,    # board-derived, not hardcoded
+                exchange=exchange,
                 side=side,
                 qty=size,
                 order_type=1,  # market
@@ -134,6 +172,11 @@ class OrderManager:
             )
 
             if result and result.get("ok"):
+                order_id = result.get("order_id", "")
+
+                # Poll /positions to get ExecutionID (hold_id) for later close
+                hold_id, pos_exchange = self._poll_hold_id(ticker, side)
+
                 pos = LivePosition(
                     ticker=ticker, side=side,
                     entry_price=price, entry_time=now,
@@ -141,7 +184,10 @@ class OrderManager:
                     take_profit=take_profit,
                     trailing_stop=stop_loss,
                     exchange=exchange,
-                    order_id=result.get("order_id", ""),
+                    order_exchange=exchange,
+                    order_id=order_id,
+                    hold_id=hold_id,
+                    position_exchange=pos_exchange if pos_exchange else exchange,
                     reason=reason,
                     session=session,
                 )
@@ -149,7 +195,7 @@ class OrderManager:
                 self.daily_trade_count += 1
                 print(f"  🔥 [LIVE] {side} {ticker} × {size}株 "
                       f"Exchange={exchange} MTT={mtt}({mtt_label}) "
-                      f"| OrderID={result.get('order_id','')}")
+                      f"| OrderID={order_id} HoldID={hold_id}")
                 return result
             else:
                 code = result.get('code', 0) if result else '?'
@@ -159,8 +205,25 @@ class OrderManager:
                     return result
                 return {"ok": False, "http": 0, "code": 0, "message": "no result from api"}
 
+    def _try_resolve_hold_id(self, pos: LivePosition) -> None:
+        """Attempt to resolve hold_id if it was not obtained during entry."""
+        if pos.hold_id and not pos.hold_id.startswith("PAPER"):
+            return  # already resolved
+
+        print(f"  🔄 Attempting late hold_id resolution for {pos.ticker}...")
+        hold_id, pos_exchange = self._poll_hold_id(pos.ticker, pos.side)
+        if hold_id:
+            pos.hold_id = hold_id
+            pos.position_exchange = pos_exchange
+
     def exit(self, pos: LivePosition, current_price: float, reason: str) -> LiveTrade:
-        """Close position"""
+        """Close position.
+
+        In LIVE mode:
+        - Sends margin close order via API
+        - Only removes local position if API close succeeds
+        - Uses hold_id (ExecutionID) and position_exchange from /positions
+        """
 
         now = datetime.now()
 
@@ -180,17 +243,44 @@ class OrderManager:
             session=pos.session,
         )
 
-        if not self.paper_mode and pos.hold_id and not pos.hold_id.startswith("PAPER"):
+        if not self.paper_mode:
+            # Try to resolve hold_id if missing
+            self._try_resolve_hold_id(pos)
+
+            if not pos.hold_id or pos.hold_id.startswith("PAPER"):
+                print(f"  ❌ [LIVE] Cannot close {pos.ticker}: no hold_id (ExecutionID)")
+                print(f"     Position remains open. Manual intervention required.")
+                # DO NOT remove from self.positions — position is still open on exchange
+                return trade
+
             close_side = "SELL" if pos.side == "BUY" else "BUY"
-            self.client.send_margin_close(
+
+            # Use the Exchange from /positions (matches the actual position)
+            close_exchange = pos.position_exchange if pos.position_exchange else pos.order_exchange
+
+            close_result = self.client.send_margin_close(
                 symbol=pos.ticker,
-                exchange=pos.exchange,   # use stored exchange
+                exchange=close_exchange,
                 side=close_side,
                 qty=pos.size,
                 hold_id=pos.hold_id,
                 order_type=1,
                 margin_trade_type=self.margin_trade_type,
             )
+
+            if not close_result or not close_result.get("ok"):
+                code = close_result.get("code", "?") if close_result else "?"
+                msg = close_result.get("message", "") if close_result else ""
+                print(f"  ❌ [LIVE] Close order FAILED for {pos.ticker}: "
+                      f"code={code} {msg}")
+                print(f"     Exchange={close_exchange} HoldID={pos.hold_id}")
+                print(f"     Position remains open. Manual intervention required.")
+                # DO NOT remove from self.positions — API close failed
+                return trade
+
+            print(f"  ✅ [LIVE] Close order accepted for {pos.ticker}: "
+                  f"OrderID={close_result.get('order_id', '')} "
+                  f"Exchange={close_exchange} HoldID={pos.hold_id}")
 
         mode_tag = "PAPER" if self.paper_mode else "LIVE"
         pnl_str = f"+{pnl:,.0f}" if pnl >= 0 else f"{pnl:,.0f}"
