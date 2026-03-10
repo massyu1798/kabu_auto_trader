@@ -1,9 +1,16 @@
-"""発注・ポジション管理モジュール (v15.1: structured order result)"""
+"""発注・ポジション管理モジュール (v15.3: configurable margin_trade_type)"""
 
 import time
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from core.api_client import KabuClient
+
+# MarginTradeType labels for logging
+MARGIN_TRADE_TYPE_LABELS = {
+    1: "制度信用",
+    2: "一般(長期)",
+    3: "一般(デイトレ)",
+}
 
 
 @dataclass
@@ -39,7 +46,7 @@ class LiveTrade:
 
 
 class OrderManager:
-    """発注・ポジション管理 (v15.1: structured order result)"""
+    """発注・ポジション管理 (v15.3: configurable margin_trade_type)"""
 
     def __init__(self, client: KabuClient, config: dict):
         self.client = client
@@ -50,6 +57,9 @@ class OrderManager:
         self.daily_pnl = 0.0
         self.daily_trade_count = 0
         self.cooldown_until: dict[str, datetime] = {}
+
+        # margin_trade_type from config (default: 3 = デイトレ)
+        self.margin_trade_type: int = int(self.trade_config.get("margin_trade_type", 3))
 
         # BT-aligned cooldown config (set by main_live after init)
         self.cooldown_config: dict = {
@@ -110,18 +120,22 @@ class OrderManager:
             )
             self.positions.append(pos)
             self.daily_trade_count += 1
-            print(f"  📝 [PAPER] {side} {ticker} × {size}株 @ {price:.0f}円")
+            mtt_label = MARGIN_TRADE_TYPE_LABELS.get(self.margin_trade_type, "?")
+            print(f"  📝 [PAPER] {side} {ticker} × {size}株 @ {price:.0f}円 "
+                  f"MTT={self.margin_trade_type}({mtt_label})")
             print(f"       SL={stop_loss:.0f} TP={take_profit:.0f} | {reason}")
             return {"ok": True}
         else:
-            margin_type = 1  # 制度信用
+            mtt = self.margin_trade_type
+            mtt_label = MARGIN_TRADE_TYPE_LABELS.get(mtt, "?")
+
             result = self.client.send_margin_order(
                 symbol=ticker,
                 exchange=1,
                 side=side,
                 qty=size,
                 order_type=1,  # 成行
-                margin_trade_type=margin_type,
+                margin_trade_type=mtt,
             )
 
             if result and result.get("ok"):
@@ -137,11 +151,13 @@ class OrderManager:
                 )
                 self.positions.append(pos)
                 self.daily_trade_count += 1
-                print(f"  🔥 [LIVE] {side} {ticker} × {size}株 | OrderID={result.get('order_id','')}")
+                print(f"  🔥 [LIVE] {side} {ticker} × {size}株 "
+                      f"MTT={mtt}({mtt_label}) | OrderID={result.get('order_id','')}")
                 return result
             else:
                 # Return the structured error so caller can inspect code
-                print(f"  ❌ 発注失敗: {ticker} code={result.get('code',0) if result else '?'}")
+                code = result.get('code', 0) if result else '?'
+                print(f"  ❌ 発注失敗: {ticker} code={code} MTT={mtt}({mtt_label})")
                 if result:
                     return result
                 return {"ok": False, "http": 0, "code": 0, "message": "no result from api"}
@@ -176,6 +192,7 @@ class OrderManager:
                 qty=pos.size,
                 hold_id=pos.hold_id,
                 order_type=1,  # 成行
+                margin_trade_type=self.margin_trade_type,
             )
 
         mode_tag = "PAPER" if self.paper_mode else "LIVE"

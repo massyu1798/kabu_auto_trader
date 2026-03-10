@@ -1,9 +1,17 @@
-"""kabu STATION API クライアント (v13.1: structured order result)"""
+"""kabu STATION API クライアント (v15.3: payload logging on error)"""
 
 import requests
 import json
 import time
 from core.auth import KabuAuth
+
+
+# Fields to log on order failure (never log Password/Token)
+_ORDER_LOG_FIELDS = [
+    "Symbol", "Exchange", "SecurityType", "Side", "CashMargin",
+    "MarginTradeType", "DelivType", "FundType", "AccountType",
+    "Qty", "FrontOrderType", "Price", "ExpireDay",
+]
 
 
 class KabuClient:
@@ -72,6 +80,15 @@ class KabuClient:
             print(f"  ❌ API 通信エラー: {path} -> {e}")
             return None
 
+    @staticmethod
+    def _format_payload_log(data: dict) -> str:
+        """Format order payload for logging (no sensitive fields)."""
+        parts = []
+        for key in _ORDER_LOG_FIELDS:
+            if key in data:
+                parts.append(f"{key}={data[key]}")
+        return " ".join(parts)
+
     def _post_order(self, path: str, data: dict) -> dict:
         """POST for /sendorder — returns structured result for error handling.
 
@@ -104,6 +121,8 @@ class KabuClient:
                 api_msg = res.text[:200]
 
             print(f"  ⚠️ /sendorder -> {res.status_code} Code={api_code} {api_msg}")
+            # Log payload fields for diagnosis (never log Password)
+            print(f"     payload: {self._format_payload_log(data)}")
             return {"ok": False, "http": res.status_code, "code": api_code, "message": api_msg}
 
         except requests.exceptions.Timeout:
@@ -153,6 +172,11 @@ class KabuClient:
     ) -> dict:
         """
         信用新規注文 — returns structured result.
+
+        margin_trade_type:
+            1 = 制度信用
+            2 = 一般信用（長期）
+            3 = 一般信用（デイトレ）  ← recommended for day-trade
 
         Success: {"ok": True, "order_id": "...", "raw": {...}}
         Failure: {"ok": False, "http": <status_code>, "code": <api_code>, "message": "..."}
