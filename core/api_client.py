@@ -1,4 +1,4 @@
-"""kabu STATION API client (v16.1: Exchange=27 for orders, FundType='02' required)"""
+"""kabu STATION API client (v17.1: spec-aligned margin orders, hold_id resolution)"""
 
 import requests
 import json
@@ -16,10 +16,11 @@ _ORDER_LOG_FIELDS = [
 # Exchange candidates for /symbol info queries
 _SYMBOL_EXCHANGE_CANDIDATES = [1, 3, 5, 6]
 
-# Exchange candidates for /sendorder
-# 27 = 東証+ (required during normal trading hours)
-#  1 = 東証  (only when SOR/東証+ is in maintenance)
-_ORDER_EXCHANGE_CANDIDATES = [27, 1]
+# Exchange candidates for /sendorder (new-open)
+# 27 = 東証+ (required since 2026-02 per issue #1072)
+#  9 = SOR   (alternative)
+#  1 = 東証  (DEPRECATED for new orders; only for closing Exchange=1 positions)
+_ORDER_EXCHANGE_CANDIDATES = [27, 9]
 
 # Error classification map
 _ERROR_CATEGORIES = {
@@ -29,6 +30,7 @@ _ERROR_CATEGORIES = {
     4001005: "parameter_convert",
     4001006: "rate_limit",
     100368: "margin_blocked",
+    8: "close_position_error",
 }
 
 
@@ -188,18 +190,14 @@ class KabuClient:
         return 1
 
     def find_order_exchange(self, symbol: str) -> int:
-        """Determine the correct Exchange for /sendorder.
+        """Determine the correct Exchange for /sendorder (new-open).
 
-        During normal trading hours, new orders require Exchange=27 (東証+).
-        Exchange=1 (東証) is only available when SOR/東証+ is in maintenance.
+        Per issue #1072 (2026-02~), Exchange=1 is DEPRECATED for new orders.
+        New orders require Exchange=27 (東証+) or 9 (SOR).
 
-        Returns: 27 (preferred) or 1 (fallback).
+        Returns: 27 (preferred).
         """
-        # We can't easily test sendorder to determine exchange,
-        # so we return 27 as default and let the caller fall back to 1
-        # if 100378 is returned.
         print(f"  ✅ Order Exchange: defaulting to 27 (東証+) for {symbol}")
-        print(f"     (Fallback to 1 if 100378 occurs)")
         return 27
 
     def get_board(self, symbol: str, exchange: int = 1) -> dict:
@@ -224,9 +222,59 @@ class KabuClient:
         return result if isinstance(result, list) else []
 
     def get_positions(self, product: str = "2") -> list:
-        """Position list (1=spot, 2=margin)"""
+        """Position list (1=spot, 2=margin)
+
+        Returns list of position dicts. Each position includes:
+        - ExecutionID: the ID to use as HoldID in ClosePositions
+        - Symbol, Exchange, Side, Qty, LeavesQty, Price, etc.
+        """
         result = self._get("/positions", params={"product": product})
         return result if isinstance(result, list) else []
+
+    def resolve_position_hold_ids(self, symbol: str, side: str) -> list:
+        """Fetch open margin positions for a symbol and return hold info.
+
+        After a new-open order fills, call this to get the ExecutionID
+        needed for ClosePositions[].HoldID in the close order.
+
+        Args:
+            symbol: e.g. "8306"
+            side: "BUY" or "SELL" (the ENTRY side, i.e. Side=2 for BUY)
+
+        Returns:
+            list of dicts: [{"hold_id": str, "qty": int, "exchange": int, "price": float}, ...]
+            Each hold_id is the ExecutionID from /positions.
+        """
+        positions = self.get_positions(product="2")
+        if not positions:
+            return []
+
+        # Side in API: "2"=BUY, "1"=SELL
+        target_side = "2" if side == "BUY" else "1"
+
+        results = []
+        for pos in positions:
+            if str(pos.get("Symbol", "")) != str(symbol):
+                continue
+            if str(pos.get("Side", "")) != target_side:
+                continue
+
+            leaves_qty = pos.get("LeavesQty", 0)
+            if leaves_qty <= 0:
+                continue
+
+            exec_id = pos.get("ExecutionID", "")
+            if not exec_id:
+                continue
+
+            results.append({
+                "hold_id": str(exec_id),
+                "qty": int(leaves_qty),
+                "exchange": int(pos.get("Exchange", 1)),
+                "price": float(pos.get("Price", 0)),
+            })
+
+        return results
 
     # --- Order APIs ---
 
@@ -239,8 +287,22 @@ class KabuClient:
         order_type: int = 1,
         price: float = 0,
         margin_trade_type: int = 3,
+        deliv_type: int = 0,
+        fund_type: str = "11",
     ) -> dict:
-        """Margin new-open order (CashMargin=2)"""
+        """Margin new-open order (CashMargin=2).
+
+        API spec (current as of 2026-02):
+        - Exchange: 27 (東証+) or 9 (SOR). Exchange=1 is DEPRECATED for new orders.
+        - DelivType: 0 (指定なし) for margin new-open.
+          ※ New-open and close have ASYMMETRIC DelivType rules:
+            - 信用新規 (CashMargin=2): DelivType=0
+            - 信用返済 (CashMargin=3): DelivType=2 (お預り金)
+        - FundType: '11' (信用取引). Spec says optional for margin (can omit),
+          but explicit '11' avoids ambiguity.
+        - AccountType: 4 (特定口座)
+        - MarginTradeType: 3 (一般信用デイトレ)
+        """
         side_code = "2" if side == "BUY" else "1"
 
         data = {
@@ -251,7 +313,8 @@ class KabuClient:
             "Side": side_code,
             "CashMargin": 2,
             "MarginTradeType": margin_trade_type,
-            "DelivType": 0,
+            "DelivType": deliv_type,
+            "FundType": fund_type,
             "AccountType": 4,
             "Qty": qty,
             "FrontOrderType": 10 if order_type == 1 else 20,
@@ -321,8 +384,24 @@ class KabuClient:
         order_type: int = 1,
         price: float = 0,
         margin_trade_type: int = 3,
+        deliv_type: int = 2,
+        fund_type: str = "11",
     ) -> dict:
-        """Margin close order (CashMargin=3)"""
+        """Margin close order (CashMargin=3).
+
+        API spec (current as of 2026-02):
+        - Exchange: MUST match the Exchange of the position being closed.
+          Per issue #1072: positions opened with Exchange=1 can only be
+          closed with Exchange=1. Positions opened with 27/9 must be
+          closed with 27/9 respectively.
+        - DelivType: 2 (お預り金) for margin close.
+          ※ ASYMMETRIC with new-open: new-open uses DelivType=0, close uses 2.
+        - FundType: '11' (信用取引) — optional per spec but explicit is safer.
+        - ClosePositions[].HoldID: must be the ExecutionID from /positions.
+
+        Returns:
+            dict: Structured result (same format as _post_order).
+        """
         side_code = "2" if side == "BUY" else "1"
 
         data = {
@@ -333,7 +412,8 @@ class KabuClient:
             "Side": side_code,
             "CashMargin": 3,
             "MarginTradeType": margin_trade_type,
-            "DelivType": 0,
+            "DelivType": deliv_type,
+            "FundType": fund_type,
             "AccountType": 4,
             "Qty": qty,
             "ClosePositions": [{"HoldID": hold_id, "Qty": qty}],

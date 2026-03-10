@@ -1,5 +1,5 @@
 """
-Margin New-Open order test — sendorder diagnosis tool
+Margin New-Open order test — sendorder diagnosis tool (v17.1)
 
 Purpose:
   Determine which margin trade types are available for CashMargin=2 (new open).
@@ -9,9 +9,20 @@ Tests:
   1. MarginTradeType=1 (制度信用)   — the most common margin type
   2. MarginTradeType=3 (デイトレ)   — day-trade margin (your main config)
 
+v17.1 changes:
+  - Exchange=27 (東証+) instead of 1 (東証) per issue #1072
+  - DelivType=0 (指定なし) for new-open ← ASYMMETRIC with close (=2)
+  - FundType='11' (信用取引) instead of '  '
+  - AccountType=4 (特定口座)
+
+DelivType asymmetry:
+  - 信用新規 (CashMargin=2): DelivType=0
+  - 信用返済 (CashMargin=3): DelivType=2 (お預り金)
+
 Interpretation:
   - OrderId returned     → that margin type works
   - Code=100368          → that margin type is blocked
+  - Code=100378          → Exchange mismatch (try 9=SOR instead of 27)
   - Other error          → parameter or market issue
 
 WARNING:
@@ -45,7 +56,7 @@ except KeyError as e:
 # Use a lower-priced symbol to minimize margin requirement
 # 8306 = MUFG (三菱UFJ) — typically ~1,500-2,500 JPY range
 TEST_SYMBOL = "8306"
-TEST_EXCHANGE = 1       # Tokyo Stock Exchange
+TEST_EXCHANGE = 27      # 東証+ (required since 2026-02 per issue #1072)
 TEST_SIDE = "2"         # "2" = BUY
 TEST_QTY = 100          # Minimum lot
 
@@ -77,8 +88,9 @@ def get_current_price(token, symbol):
     """Fetch current price for display."""
     headers = {"X-API-KEY": token}
     try:
+        # /board uses Exchange=1 for info queries (not 27)
         res = requests.get(
-            f"{BASE_URL}/board/{symbol}@{TEST_EXCHANGE}",
+            f"{BASE_URL}/board/{symbol}@1",
             headers=headers,
             timeout=10,
         )
@@ -98,13 +110,13 @@ def send_margin_new_order(token, margin_trade_type):
     body = {
         "Password": API_PASSWORD,
         "Symbol": TEST_SYMBOL,
-        "Exchange": TEST_EXCHANGE,
+        "Exchange": TEST_EXCHANGE,      # 27 = 東証+ (per issue #1072)
         "SecurityType": 1,              # 1 = Stock
         "Side": TEST_SIDE,              # "2" = Buy
         "CashMargin": 2,               # 2 = Margin New Open (信用新規)
         "MarginTradeType": margin_trade_type,
-        "DelivType": 0,                # 0 = auto (for margin)
-        "FundType": "  ",              # "  " = auto (two half-width spaces)
+        "DelivType": 0,                # 0 = 指定なし (new-open uses 0; close uses 2)
+        "FundType": "11",              # "11" = 信用取引 (v17.1)
         "AccountType": 4,              # 4 = Specific account (特定口座)
         "Qty": TEST_QTY,
         "FrontOrderType": 10,          # 10 = Market order (成行)
@@ -139,11 +151,15 @@ def send_margin_new_order(token, margin_trade_type):
 def main():
     print("=" * 60)
     print("  sendorder Diagnosis: Margin New Open (CashMargin=2)")
+    print("  v17.1: Exchange=27, DelivType=0(新規)/2(返済), FundType='11'")
     print("=" * 60)
     print(f"\n  Symbol:  {TEST_SYMBOL}")
+    print(f"  Exchange: {TEST_EXCHANGE} (東証+)")
     print(f"  Side:    BUY")
     print(f"  Qty:     {TEST_QTY} shares")
     print(f"  Order:   Market (成行)")
+    print(f"  DelivType: 0 (指定なし — 新規注文用)")
+    print(f"  FundType:  11 (信用取引)")
     print(f"  Tests:   {len(MTT_CANDIDATES)} MarginTradeType patterns")
 
     # --- Step 1: Token ---
@@ -201,9 +217,10 @@ def main():
             print(f"\n  ❌ REJECTED — Code={code} {message}")
             results.append((mtt, mtt_label, False, code, message))
 
-            # If 100368 (margin blocked), continue to try next type
             if code == 100368:
                 print(f"     → Code 100368: margin new-open is BLOCKED for MTT={mtt}")
+            elif code == 100378:
+                print(f"     → Code 100378: Exchange mismatch. Try Exchange=9 (SOR)?")
 
     # --- Step 4: Summary ---
     print(f"\n\n■ Step 4: Diagnosis Summary")
