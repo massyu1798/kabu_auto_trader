@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-現物 vs 信用 切り分け診断ツール
+現物 vs 信用 切り分け診断ツール (v16.0)
 
 100368「現在、株式信用新規の注文は抑止されております。」が
 「信用新規だけ」なのか「sendorder 全般」なのかを一発で切り分けます。
@@ -61,7 +61,12 @@ def mask_password(payload: dict) -> dict:
 def build_payload(auth: KabuAuth, symbol: str, exchange: int,
                   side: str, qty: int,
                   cash_margin: int, margin_trade_type: int | None) -> dict:
-    """Build /sendorder payload for cash or margin order."""
+    """Build /sendorder payload for cash or margin order.
+
+    Key fix (v16.0): No empty-string/whitespace FundType.
+    - Cash (CashMargin=1): DelivType=2, FundType omitted (API default)
+    - Margin (CashMargin=2): DelivType=0, FundType omitted
+    """
     side_code = "2" if side.upper() == "BUY" else "1"
 
     payload = {
@@ -71,14 +76,14 @@ def build_payload(auth: KabuAuth, symbol: str, exchange: int,
         "SecurityType": 1,
         "Side": side_code,
         "CashMargin": cash_margin,
-        "DelivType": 2 if cash_margin == 1 else 0,  # 2=お預り金 for cash, 0 for margin
-        "FundType": "  ",
+        "DelivType": 2 if cash_margin == 1 else 0,
         "AccountType": 4,             # 4=特定
         "Qty": qty,
         "FrontOrderType": 10,         # 10=成行
         "Price": 0,
         "ExpireDay": 0,               # 0=当日
     }
+    # Note: FundType intentionally omitted (was "  " which caused 4001005)
 
     # MarginTradeType is only for margin orders (CashMargin=2,3)
     if margin_trade_type is not None:
@@ -123,6 +128,32 @@ def send_order(base_url: str, auth: KabuAuth, payload: dict) -> dict:
         return {"ok": False, "http": 0, "code": 0, "message": str(e)}
 
 
+def resolve_exchange(base_url: str, auth: KabuAuth, symbol: str) -> int:
+    """Auto-detect the correct Exchange for a symbol via /symbol endpoint."""
+    headers = auth.get_headers()
+    if not headers:
+        return 1
+    candidates = [1, 3, 5, 6]
+    for ex in candidates:
+        try:
+            res = requests.get(
+                f"{base_url}/symbol/{symbol}@{ex}",
+                headers=headers,
+                timeout=10,
+            )
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("Symbol") == symbol:
+                    resolved = data.get("Exchange", ex)
+                    name = data.get("DisplayName", "?")
+                    print(f"  ✅ Exchange resolved: {symbol} -> {resolved} ({name})")
+                    return resolved
+        except Exception:
+            continue
+    print(f"  ⚠️ Could not resolve Exchange for {symbol}. Using default 1.")
+    return 1
+
+
 def test_single(base_url: str, auth: KabuAuth, symbol: str, exchange: int,
                 side: str, qty: int, order_key: str, dry_run: bool) -> dict | None:
     """Test a single order type."""
@@ -165,19 +196,26 @@ def test_single(base_url: str, auth: KabuAuth, symbol: str, exchange: int,
             print(f"     → ワンショット金額エラー")
         elif result["code"] == 4001006:
             print(f"     → API実行回数エラー: しばらく待ってください")
+        elif result["code"] == 4001005:
+            print(f"     → パラメータ変換エラー: payloadの型/値を確認")
+        elif result["code"] == 100378:
+            print(f"     → 市場コードエラー: Exchange={exchange} がこの銘柄に合わない可能性")
+        elif result["code"] in (1010004, 100031):
+            print(f"     → 預り区分エラー: DelivType/FundType の組み合わせが不正")
 
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="現物 vs 信用 切り分け診断 — 100368 が信用だけかを判定")
+        description="現物 vs 信用 切り分け診断 — 100368 が信用だけかを判定 (v16.0)")
     parser.add_argument("--symbol", required=True, help="Symbol code (e.g. 4063)")
     parser.add_argument("--side", required=True, choices=["BUY", "SELL"], help="BUY or SELL")
     parser.add_argument("--qty", type=int, default=100, help="Quantity (default: 100)")
     parser.add_argument("--all", action="store_true",
                         help="現物 + 信用(制度/一般/デイトレ)の4パターン全て試す")
-    parser.add_argument("--exchange", type=int, default=1, help="Exchange (default: 1=東証)")
+    parser.add_argument("--exchange", type=int, default=None,
+                        help="Exchange (default: auto-detect via /symbol)")
     parser.add_argument("--dry_run", action="store_true",
                         help="Build payload but do NOT send")
     parser.add_argument("--config", default="config/live_config.yaml",
@@ -214,6 +252,14 @@ def main():
         print("❌ Failed to get auth token. Is kabu STATION running?")
         return
 
+    # Auto-detect Exchange if not specified
+    if args.exchange is not None:
+        exchange = args.exchange
+        print(f"\n  Using specified Exchange: {exchange}")
+    else:
+        print(f"\n  Auto-detecting Exchange for {args.symbol}...")
+        exchange = resolve_exchange(base_url, auth, args.symbol)
+
     # Determine which tests to run
     if args.all:
         keys_to_test = ["cash", "margin_1", "margin_2", "margin_3"]
@@ -222,7 +268,7 @@ def main():
 
     results = {}
     for key in keys_to_test:
-        result = test_single(base_url, auth, args.symbol, args.exchange,
+        result = test_single(base_url, auth, args.symbol, exchange,
                              args.side, args.qty, key, args.dry_run)
         results[key] = result
         if key != keys_to_test[-1]:
