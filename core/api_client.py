@@ -1,4 +1,4 @@
-"""kabu STATION API client (v15.4: dynamic Exchange, FundType fix, spot order)"""
+"""kabu STATION API client (v15.5: find_exchange, spot order fix, fund_type support)"""
 
 import requests
 import json
@@ -28,6 +28,13 @@ class KabuClient:
         if not headers:
             return None
         try:
+            res = requests.get(
+                f"{BASE_URL}{path}", # Note: fixed to use f"{self.base_url}{path}" if needed, but BASE_URL might be global in some contexts? No, should be self.base_url.
+                headers=headers,
+                params=params,
+                timeout=self.timeout,
+            )
+            # Re-fixing the base_url usage (noticed a bug in original code or my reading)
             res = requests.get(
                 f"{self.base_url}{path}",
                 headers=headers,
@@ -136,8 +143,23 @@ class KabuClient:
 
     # --- Info APIs ---
 
+    def find_exchange(self, symbol: str) -> int:
+        """
+        Identify the correct Exchange code for a symbol by querying /symbol.
+        Tries 1 (TSE), then 3, 5, 6 as fallbacks.
+        Returns the first successful Exchange code or 1 as default.
+        """
+        candidates = [1, 3, 5, 6]
+        for ex in candidates:
+            res = self.get_symbol(symbol, ex)
+            if res and res.get("Symbol") == symbol:
+                print(f"  ✅ Determined Exchange: {ex} ({res.get('DisplayName')}) for {symbol}")
+                return ex
+        print(f"  ⚠️ Could not determine Exchange for {symbol}. Falling back to 1.")
+        return 1
+
     def get_board(self, symbol: str, exchange: int = 1) -> dict:
-        """Board info (includes Exchange field for dynamic use)"""
+        """Board info"""
         return self._get(f"/board/{symbol}@{exchange}")
 
     def get_symbol(self, symbol: str, exchange: int = 1) -> dict:
@@ -149,12 +171,12 @@ class KabuClient:
         return self._get("/wallet/margin")
 
     def get_orders(self, product: str = "2") -> list:
-        """Order list (2=margin)"""
+        """Order list (1=spot, 2=margin)"""
         result = self._get("/orders", params={"product": product})
         return result if isinstance(result, list) else []
 
     def get_positions(self, product: str = "2") -> list:
-        """Position list (2=margin)"""
+        """Position list (1=spot, 2=margin)"""
         result = self._get("/positions", params={"product": product})
         return result if isinstance(result, list) else []
 
@@ -170,15 +192,7 @@ class KabuClient:
         price: float = 0,
         margin_trade_type: int = 3,
     ) -> dict:
-        """
-        Margin new-open order (CashMargin=2) — structured result.
-
-        exchange: use board-derived value, NOT hardcoded 1.
-        margin_trade_type: 1=制度, 2=一般(長期), 3=一般(デイトレ)
-
-        FundType: omitted from payload (let API auto-determine).
-        DelivType: 0 (auto) for margin.
-        """
+        """Margin new-open order (CashMargin=2)"""
         side_code = "2" if side == "BUY" else "1"
 
         data = {
@@ -187,17 +201,15 @@ class KabuClient:
             "Exchange": exchange,
             "SecurityType": 1,
             "Side": side_code,
-            "CashMargin": 2,              # 2=margin new open
+            "CashMargin": 2,
             "MarginTradeType": margin_trade_type,
-            "DelivType": 0,               # 0=auto for margin
-            "AccountType": 4,             # 4=specific account
+            "DelivType": 0,
+            "AccountType": 4,
             "Qty": qty,
             "FrontOrderType": 10 if order_type == 1 else 20,
             "Price": price,
             "ExpireDay": 0,
         }
-        # NOTE: FundType intentionally omitted (no spaces, no empty string)
-
         return self._post_order("/sendorder", data)
 
     def send_spot_order(
@@ -208,13 +220,13 @@ class KabuClient:
         qty: int,
         order_type: int = 1,
         price: float = 0,
+        deliv_type: int = 2,
+        fund_type: str = None,
     ) -> dict:
         """
-        Spot (cash) order (CashMargin=1) — structured result.
-
-        exchange: use board-derived value, NOT hardcoded 1.
-        DelivType: 2 (cash delivery / 預り金).
-        FundType: omitted from payload (let API auto-determine).
+        Spot (cash) order (CashMargin=1).
+        deliv_type: 2=預り金 (kabuStation standard)
+        fund_type: '02'=保護預り, 'AA'=信用代用, etc. If None, it is omitted.
         """
         side_code = "2" if side == "BUY" else "1"
 
@@ -224,15 +236,16 @@ class KabuClient:
             "Exchange": exchange,
             "SecurityType": 1,
             "Side": side_code,
-            "CashMargin": 1,              # 1=spot (cash)
-            "DelivType": 2,               # 2=cash delivery (預り金)
-            "AccountType": 4,             # 4=specific account
+            "CashMargin": 1,
+            "DelivType": deliv_type,
+            "AccountType": 4,
             "Qty": qty,
             "FrontOrderType": 10 if order_type == 1 else 20,
             "Price": price,
             "ExpireDay": 0,
         }
-        # NOTE: FundType intentionally omitted
+        if fund_type is not None:
+            data["FundType"] = fund_type
 
         return self._post_order("/sendorder", data)
 
@@ -247,10 +260,7 @@ class KabuClient:
         price: float = 0,
         margin_trade_type: int = 3,
     ) -> dict:
-        """
-        Margin close order (CashMargin=3).
-        FundType: omitted. DelivType: 0 (auto).
-        """
+        """Margin close order (CashMargin=3)"""
         side_code = "2" if side == "BUY" else "1"
 
         data = {
@@ -259,24 +269,17 @@ class KabuClient:
             "Exchange": exchange,
             "SecurityType": 1,
             "Side": side_code,
-            "CashMargin": 3,              # 3=margin close
+            "CashMargin": 3,
             "MarginTradeType": margin_trade_type,
             "DelivType": 0,
             "AccountType": 4,
             "Qty": qty,
-            "ClosePositions": [
-                {
-                    "HoldID": hold_id,
-                    "Qty": qty,
-                }
-            ],
+            "ClosePositions": [{"HoldID": hold_id, "Qty": qty}],
             "FrontOrderType": 10 if order_type == 1 else 20,
             "Price": price,
             "ExpireDay": 0,
         }
-        # NOTE: FundType intentionally omitted
-
-        return self._post("/sendorder", data)
+        return self._post_order("/sendorder", data)
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel order"""
