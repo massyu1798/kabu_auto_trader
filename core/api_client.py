@@ -1,4 +1,4 @@
-"""kabu STATION API client (v17.1: spec-aligned margin orders, hold_id resolution)"""
+"""kabu STATION API client (v18.0: spec-aligned margin orders, multi-lot close)"""
 
 import requests
 import json
@@ -234,8 +234,9 @@ class KabuClient:
     def resolve_position_hold_ids(self, symbol: str, side: str) -> list:
         """Fetch open margin positions for a symbol and return hold info.
 
-        After a new-open order fills, call this to get the ExecutionID
+        After a new-open order fills, call this to get the ExecutionID(s)
         needed for ClosePositions[].HoldID in the close order.
+        Returns ALL matching lots (supports split fills / multiple executions).
 
         Args:
             symbol: e.g. "8306"
@@ -380,7 +381,7 @@ class KabuClient:
         exchange: int,
         side: str,
         qty: int,
-        hold_id: str,
+        close_positions: list[dict] = None,
         order_type: int = 1,
         price: float = 0,
         margin_trade_type: int = 3,
@@ -391,18 +392,27 @@ class KabuClient:
 
         API spec (current as of 2026-02):
         - Exchange: MUST match the Exchange of the position being closed.
-          Per issue #1072: positions opened with Exchange=1 can only be
-          closed with Exchange=1. Positions opened with 27/9 must be
-          closed with 27/9 respectively.
+          Per issue #1072: Exchange must match the position's Exchange.
+          In practice, we unify to Exchange=27 (東証+).
         - DelivType: 2 (お預り金) for margin close.
           ※ ASYMMETRIC with new-open: new-open uses DelivType=0, close uses 2.
         - FundType: '11' (信用取引) — optional per spec but explicit is safer.
-        - ClosePositions[].HoldID: must be the ExecutionID from /positions.
+        - ClosePositions: list of {"HoldID": str, "Qty": int} dicts.
+          HoldID = ExecutionID from /positions.
+          Multiple entries are supported for split fills / multiple lots.
+
+        Args:
+            close_positions: list of {"HoldID": str, "Qty": int} dicts.
+                If None, falls back to a single entry with empty HoldID (not recommended).
 
         Returns:
             dict: Structured result (same format as _post_order).
         """
         side_code = "2" if side == "BUY" else "1"
+
+        # Build ClosePositions — accept list or fall back to single empty entry
+        if close_positions is None:
+            close_positions = [{"HoldID": "", "Qty": qty}]
 
         data = {
             "Password": self.auth.api_password,
@@ -416,7 +426,7 @@ class KabuClient:
             "FundType": fund_type,
             "AccountType": 4,
             "Qty": qty,
-            "ClosePositions": [{"HoldID": hold_id, "Qty": qty}],
+            "ClosePositions": close_positions,
             "FrontOrderType": 10 if order_type == 1 else 20,
             "Price": price,
             "ExpireDay": 0,
