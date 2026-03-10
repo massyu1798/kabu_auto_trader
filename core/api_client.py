@@ -1,4 +1,4 @@
-"""kabu STATION API client (v17.0: spec-aligned margin orders, hold_id resolution)"""
+"""kabu STATION API client (v17.1: spec-aligned margin orders, hold_id resolution)"""
 
 import requests
 import json
@@ -287,15 +287,17 @@ class KabuClient:
         order_type: int = 1,
         price: float = 0,
         margin_trade_type: int = 3,
-        deliv_type: int = 2,
+        deliv_type: int = 0,
         fund_type: str = "11",
     ) -> dict:
         """Margin new-open order (CashMargin=2).
 
         API spec (current as of 2026-02):
         - Exchange: 27 (東証+) or 9 (SOR). Exchange=1 is DEPRECATED for new orders.
-        - DelivType: 2 (お預り金). Spec says 0=auto is possible for margin,
-          but explicit 2 is safer and matches user requirement.
+        - DelivType: 0 (指定なし) for margin new-open.
+          ※ New-open and close have ASYMMETRIC DelivType rules:
+            - 信用新規 (CashMargin=2): DelivType=0
+            - 信用返済 (CashMargin=3): DelivType=2 (お預り金)
         - FundType: '11' (信用取引). Spec says optional for margin (can omit),
           but explicit '11' avoids ambiguity.
         - AccountType: 4 (特定口座)
@@ -393,6 +395,7 @@ class KabuClient:
           closed with Exchange=1. Positions opened with 27/9 must be
           closed with 27/9 respectively.
         - DelivType: 2 (お預り金) for margin close.
+          ※ ASYMMETRIC with new-open: new-open uses DelivType=0, close uses 2.
         - FundType: '11' (信用取引) — optional per spec but explicit is safer.
         - ClosePositions[].HoldID: must be the ExecutionID from /positions.
 
