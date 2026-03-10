@@ -8,19 +8,30 @@ kabu STATION API 接続テスト
   4. 信用取引余力照会
   5. 注文一覧照会
 
-※ 検証用ポート(18081)を使用するため、実際の発注は行いません。
+※ 本番ポート(18080)を使用します。発注は行いません。
 """
 
 import requests
 import json
+import sys
+import yaml
 
 # ============================================
-# 設定（APIパスワードだけ書き換えてください）
+# Load config (password from live_config.yaml)
 # ============================================
-API_PASSWORD = "179825519"   # ← ここを書き換える
+CONFIG_PATH = "config/live_config.yaml"
 
-# 本番ポート（実データ取得）
-BASE_URL = "http://localhost:18080/kabusapi"
+try:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        _cfg = yaml.safe_load(f)
+    API_PASSWORD = _cfg["api"]["password"]
+    BASE_URL = _cfg["api"]["base_url"]
+except FileNotFoundError:
+    print(f"  ❌ {CONFIG_PATH} not found. Copy from live_config.example.yaml first.")
+    sys.exit(1)
+except KeyError as e:
+    print(f"  ❌ Missing key in {CONFIG_PATH}: {e}")
+    sys.exit(1)
 
 # ============================================
 # テスト実行
@@ -201,9 +212,8 @@ def test_connection():
     print("\n" + "=" * 60)
     print("  接続テスト完了!")
     print("=" * 60)
-    print(f"\n  使用ポート: 18081（検証用）")
-    print(f"  ※ 本番ポートは 18080 です")
-    print(f"  ※ 本番への切り替えは自動売買Bot構築時に行います")
+    print(f"\n  使用ポート: {BASE_URL}")
+    print(f"  ※ パスワードは {CONFIG_PATH} から読み込み")
 
 
 if __name__ == "__main__":
