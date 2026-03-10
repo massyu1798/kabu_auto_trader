@@ -1,5 +1,5 @@
 """
-JP Stock Auto Trading Bot v17.0 - spec-aligned margin orders + hold_id
+JP Stock Auto Trading Bot v18.0 - multi-lot hold_entries + spec-aligned margin
 - Morning (9:05-11:00): EnsembleEngine (BUY + SELL) + daily bias filter
 - Afternoon (config entry_start-entry_end): AfternoonReversalEngine (BUY + SELL)
 - 5-min OHLCV bars from /board API
@@ -11,8 +11,9 @@ JP Stock Auto Trading Bot v17.0 - spec-aligned margin orders + hold_id
 - Force close: PM at force_close_time, all at market close
 - Cooldown: config-based bars (BT-aligned)
 - API error handling: blacklist, order throttle, break on 429
-- v17.0: Exchange=27 for new orders (issue #1072), DelivType=2,
-         FundType='11', hold_id from /positions, safe close flow
+- v18.0: Exchange=27 for new orders (issue #1072),
+         DelivType=0(新規)/2(返済), FundType='11',
+         multi-lot hold_entries from /positions, safe close flow
 """
 
 import math
@@ -33,7 +34,7 @@ from backtest.screener import screen_stocks
 # Minimum completed 5-min bars required for signal calculation
 MIN_BARS = 10
 
-VERSION = "v17.0"
+VERSION = "v18.0"
 
 # ============================================
 # Constants for API error handling / throttle
@@ -604,7 +605,7 @@ def main():
     pm_initial_capital = float(afternoon_cfg["global"]["initial_capital"]) if afternoon_cfg else am_initial_capital
 
     print(f"\n{'='*60}")
-    print(f"Bot running... ({VERSION} spec-aligned margin + hold_id)")
+    print(f"Bot running... ({VERSION} multi-lot hold_entries + spec-aligned margin)")
     print(f"{'='*60}")
     print(f"  Watchlist: {len(watchlist)} stocks (screener={'ON' if use_screener else 'OFF'})")
     print(f"  AM Initial capital: {am_initial_capital:,.0f}")
@@ -618,14 +619,15 @@ def main():
     print(f"    margin_trade_type:          {live_mtt} ({live_mtt_label})")
     print(f"  Max orders/check: AM={MAX_ORDERS_PER_CHECK_AM} PM={MAX_ORDERS_PER_CHECK_PM}")
     print(f"  Order interval: {ORDER_INTERVAL_SEC}s")
-    print(f"  ── Order params (v17.0) ──")
-    print(f"    Exchange (new-open):  {DEFAULT_ORDER_EXCHANGE} (東証+)")
-    print(f"    Exchange (close):     from /positions (match actual position)")
-    print(f"    DelivType:            2 (お預り金)")
-    print(f"    FundType:             11 (信用取引)")
-    print(f"    AccountType:          4 (特定口座)")
-    print(f"    MarginTradeType:      {live_mtt} ({live_mtt_label})")
-    print(f"    HoldID:               from /positions ExecutionID")
+    print(f"  ── Order params (v18.0) ──")
+    print(f"    Exchange (new-open):    {DEFAULT_ORDER_EXCHANGE} (東証+)")
+    print(f"    Exchange (close):       27 (東証+ unified)")
+    print(f"    DelivType (new-open):   0 (指定なし)")
+    print(f"    DelivType (close):      2 (お預り金)")
+    print(f"    FundType:               11 (信用取引)")
+    print(f"    AccountType:            4 (特定口座)")
+    print(f"    MarginTradeType:        {live_mtt} ({live_mtt_label})")
+    print(f"    ClosePositions.HoldID:  from /positions ExecutionID (multi-lot)")
     print(f"  [AM] Entry: 9:05-11:00 | buy_thr={ensemble_cfg['buy_threshold']} sell_thr={ensemble_cfg['sell_threshold']}")
     print(f"       SL: {strat_cfg['exit']['stop_loss_atr_multiplier']} ATR | TP: {strat_cfg['exit']['take_profit_rr_ratio']} R:R")
     print(f"       Daily bias: EMA {strat_cfg.get('daily_bias',{}).get('ema_short',5)}/{strat_cfg.get('daily_bias',{}).get('ema_long',25)} (BEAR=disabled)")
@@ -842,7 +844,7 @@ def main():
                         stop_loss, take_profit, trailing_stop = calc_entry_params(
                             signal, entry_price, sl_dist, tp_dist)
 
-                        # v17.0: Always use DEFAULT_ORDER_EXCHANGE for new-open orders
+                        # v18.0: Always use DEFAULT_ORDER_EXCHANGE for new-open orders
                         # (board Exchange is for info only, not for sendorder)
                         exch = DEFAULT_ORDER_EXCHANGE
                         notional = entry_price * size
@@ -934,7 +936,7 @@ def main():
                         stop_loss, take_profit, trailing_stop = calc_entry_params(
                             signal, entry_price, sl_dist, tp_dist)
 
-                        # v17.0: Always use DEFAULT_ORDER_EXCHANGE for new-open orders
+                        # v18.0: Always use DEFAULT_ORDER_EXCHANGE for new-open orders
                         exch = DEFAULT_ORDER_EXCHANGE
                         notional = entry_price * size
                         print(f"  [{now_str}] [PM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
