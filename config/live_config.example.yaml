@@ -1,5 +1,5 @@
 # ============================================
-# 本番設定（v15.3 BT-aligned + live risk caps）- テンプレート
+# 本番設定（v15.7 Spot Order Fixes + Risk Caps）
 # ============================================
 
 api:
@@ -12,38 +12,41 @@ mode:
   log_to_file: true
 
 trade:
-  initial_capital: 7000000        # 700万（BT strategy_config.yaml に合わせる）
+  initial_capital: 7000000        # 700万
   max_positions: 2                # 本番リスク制約：最大同時ポジション数
   max_notional_per_position: 3000000  # 本番リスク制約：1ポジあたり最大建玉金額（円）
   max_total_exposure: 6000000     # 本番リスク制約：合計最大建玉金額（円）
-  risk_per_trade: 0.008           # BT strategy_config.global.risk_per_trade に合わせる
-  max_daily_loss: 0.03            # BT strategy_config.global.max_daily_loss に合わせる
+  risk_per_trade: 0.008           
+  max_daily_loss: 0.03            
+
   # 信用区分（MarginTradeType）
-  # 1 = 制度信用
-  # 2 = 一般信用（長期）
-  # 3 = 一般信用（デイトレ） ← 推奨（手数料無料想定）
-  # tools/test_sendorder.py で事前検証してから設定してください
+  # 1 = 制度信用, 2 = 一般信用（長期）, 3 = 一般信用（デイトレ）
   margin_trade_type: 3
 
+  # --- 現物(Spot)注文設定 ---
+  # test_spot_minimal.py の結果に基づいて設定してください
+  # デフォルト（kabu STATION API推奨値）:
+  spot:
+    deliv_type: 2                 # 2=預り金
+    fund_type: null               # null=省略（自動決定）
+
 # screener設定
-# enabled=true の場合、起動時に screen_stocks() を実行しBTと同じ銘柄を自動選定
-# enabled=false の場合、下記 watchlist を使用
 screener:
   enabled: true
 
 # スクリーナ無効時 or フォールバック用の手動watchlist
 watchlist:
-  - "9984"  # ソフトバンクG
-  - "8035"  # 東京エレク
-  - "6857"  # アドバンテスト
-  - "6098"  # リクルート
-  - "6762"  # TDK
-  - "6981"  # 村田製作
-  - "7203"  # トヨタ
-  - "6758"  # ソニー
-  - "6501"  # 日立
-  - "8306"  # 三菱UFJ
-  - "6902"  # デンソー
+  - "9984"
+  - "8035"
+  - "6857"
+  - "6098"
+  - "6762"
+  - "6981"
+  - "7203"
+  - "6758"
+  - "6501"
+  - "8306"
+  - "4063"
 
 interval:
   price_check_sec: 30
