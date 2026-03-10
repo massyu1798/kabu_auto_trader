@@ -621,7 +621,7 @@ def main():
     print(f"  Order interval: {ORDER_INTERVAL_SEC}s")
     print(f"  ── Order params (v18.0) ──")
     print(f"    Exchange (new-open):    {DEFAULT_ORDER_EXCHANGE} (東証+)")
-    print(f"    Exchange (close):       27 (東証+ unified)")
+    print(f"    Exchange (close):       from hold_entries (per-position)")
     print(f"    DelivType (new-open):   0 (指定なし)")
     print(f"    DelivType (close):      2 (お預り金)")
     print(f"    FundType:               11 (信用取引)")
