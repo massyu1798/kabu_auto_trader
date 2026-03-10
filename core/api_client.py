@@ -1,4 +1,4 @@
-"""kabu STATION API クライアント (v15.3: payload logging on error)"""
+"""kabu STATION API client (v15.4: dynamic Exchange, FundType fix, spot order)"""
 
 import requests
 import json
@@ -15,7 +15,7 @@ _ORDER_LOG_FIELDS = [
 
 
 class KabuClient:
-    """kabu STATION REST API ラッパー"""
+    """kabu STATION REST API wrapper"""
 
     def __init__(self, base_url: str, auth: KabuAuth, timeout: int = 10):
         self.base_url = base_url
@@ -23,7 +23,7 @@ class KabuClient:
         self.timeout = timeout
 
     def _get(self, path: str, params: dict = None) -> dict:
-        """GETリクエスト"""
+        """GET request"""
         headers = self.auth.get_headers()
         if not headers:
             return None
@@ -58,7 +58,7 @@ class KabuClient:
             return None
 
     def _post(self, path: str, data: dict) -> dict:
-        """POSTリクエスト"""
+        """POST request"""
         headers = self.auth.get_headers()
         if not headers:
             return None
@@ -134,31 +134,31 @@ class KabuClient:
             print(f"  ❌ /sendorder 通信エラー: {msg}")
             return {"ok": False, "http": 0, "code": 0, "message": msg}
 
-    # --- 情報取得系 ---
+    # --- Info APIs ---
 
     def get_board(self, symbol: str, exchange: int = 1) -> dict:
-        """板情報取得"""
+        """Board info (includes Exchange field for dynamic use)"""
         return self._get(f"/board/{symbol}@{exchange}")
 
     def get_symbol(self, symbol: str, exchange: int = 1) -> dict:
-        """銘柄情報取得"""
+        """Symbol info"""
         return self._get(f"/symbol/{symbol}@{exchange}")
 
     def get_margin_wallet(self) -> dict:
-        """信用取引余力照会"""
+        """Margin wallet"""
         return self._get("/wallet/margin")
 
     def get_orders(self, product: str = "2") -> list:
-        """注文一覧照会（2=信用）"""
+        """Order list (2=margin)"""
         result = self._get("/orders", params={"product": product})
         return result if isinstance(result, list) else []
 
     def get_positions(self, product: str = "2") -> list:
-        """建玉一覧照会（2=信用）"""
+        """Position list (2=margin)"""
         result = self._get("/positions", params={"product": product})
         return result if isinstance(result, list) else []
 
-    # --- 発注系 ---
+    # --- Order APIs ---
 
     def send_margin_order(
         self,
@@ -171,15 +171,13 @@ class KabuClient:
         margin_trade_type: int = 3,
     ) -> dict:
         """
-        信用新規注文 — returns structured result.
+        Margin new-open order (CashMargin=2) — structured result.
 
-        margin_trade_type:
-            1 = 制度信用
-            2 = 一般信用（長期）
-            3 = 一般信用（デイトレ）  ← recommended for day-trade
+        exchange: use board-derived value, NOT hardcoded 1.
+        margin_trade_type: 1=制度, 2=一般(長期), 3=一般(デイトレ)
 
-        Success: {"ok": True, "order_id": "...", "raw": {...}}
-        Failure: {"ok": False, "http": <status_code>, "code": <api_code>, "message": "..."}
+        FundType: omitted from payload (let API auto-determine).
+        DelivType: 0 (auto) for margin.
         """
         side_code = "2" if side == "BUY" else "1"
 
@@ -189,16 +187,52 @@ class KabuClient:
             "Exchange": exchange,
             "SecurityType": 1,
             "Side": side_code,
-            "CashMargin": 2,              # 2=新規
+            "CashMargin": 2,              # 2=margin new open
             "MarginTradeType": margin_trade_type,
-            "DelivType": 0,
-            "FundType": "  ",
-            "AccountType": 4,             # 4=特定
+            "DelivType": 0,               # 0=auto for margin
+            "AccountType": 4,             # 4=specific account
             "Qty": qty,
             "FrontOrderType": 10 if order_type == 1 else 20,
             "Price": price,
-            "ExpireDay": 0,               # 0=当日
+            "ExpireDay": 0,
         }
+        # NOTE: FundType intentionally omitted (no spaces, no empty string)
+
+        return self._post_order("/sendorder", data)
+
+    def send_spot_order(
+        self,
+        symbol: str,
+        exchange: int,
+        side: str,
+        qty: int,
+        order_type: int = 1,
+        price: float = 0,
+    ) -> dict:
+        """
+        Spot (cash) order (CashMargin=1) — structured result.
+
+        exchange: use board-derived value, NOT hardcoded 1.
+        DelivType: 2 (cash delivery / 預り金).
+        FundType: omitted from payload (let API auto-determine).
+        """
+        side_code = "2" if side == "BUY" else "1"
+
+        data = {
+            "Password": self.auth.api_password,
+            "Symbol": symbol,
+            "Exchange": exchange,
+            "SecurityType": 1,
+            "Side": side_code,
+            "CashMargin": 1,              # 1=spot (cash)
+            "DelivType": 2,               # 2=cash delivery (預り金)
+            "AccountType": 4,             # 4=specific account
+            "Qty": qty,
+            "FrontOrderType": 10 if order_type == 1 else 20,
+            "Price": price,
+            "ExpireDay": 0,
+        }
+        # NOTE: FundType intentionally omitted
 
         return self._post_order("/sendorder", data)
 
@@ -214,7 +248,8 @@ class KabuClient:
         margin_trade_type: int = 3,
     ) -> dict:
         """
-        信用返済注文
+        Margin close order (CashMargin=3).
+        FundType: omitted. DelivType: 0 (auto).
         """
         side_code = "2" if side == "BUY" else "1"
 
@@ -224,10 +259,9 @@ class KabuClient:
             "Exchange": exchange,
             "SecurityType": 1,
             "Side": side_code,
-            "CashMargin": 3,              # 3=返済
+            "CashMargin": 3,              # 3=margin close
             "MarginTradeType": margin_trade_type,
             "DelivType": 0,
-            "FundType": "  ",
             "AccountType": 4,
             "Qty": qty,
             "ClosePositions": [
@@ -240,11 +274,12 @@ class KabuClient:
             "Price": price,
             "ExpireDay": 0,
         }
+        # NOTE: FundType intentionally omitted
 
         return self._post("/sendorder", data)
 
     def cancel_order(self, order_id: str) -> dict:
-        """注文取消"""
+        """Cancel order"""
         data = {
             "Password": self.auth.api_password,
             "OrderID": order_id,
