@@ -1,5 +1,5 @@
 """
-Margin New-Open order test — sendorder diagnosis tool (v17.0)
+Margin New-Open order test — sendorder diagnosis tool (v17.1)
 
 Purpose:
   Determine which margin trade types are available for CashMargin=2 (new open).
@@ -9,11 +9,15 @@ Tests:
   1. MarginTradeType=1 (制度信用)   — the most common margin type
   2. MarginTradeType=3 (デイトレ)   — day-trade margin (your main config)
 
-v17.0 changes:
+v17.1 changes:
   - Exchange=27 (東証+) instead of 1 (東証) per issue #1072
-  - DelivType=2 (お預り金) instead of 0
+  - DelivType=0 (指定なし) for new-open ← ASYMMETRIC with close (=2)
   - FundType='11' (信用取引) instead of '  '
   - AccountType=4 (特定口座)
+
+DelivType asymmetry:
+  - 信用新規 (CashMargin=2): DelivType=0
+  - 信用返済 (CashMargin=3): DelivType=2 (お預り金)
 
 Interpretation:
   - OrderId returned     → that margin type works
@@ -111,8 +115,8 @@ def send_margin_new_order(token, margin_trade_type):
         "Side": TEST_SIDE,              # "2" = Buy
         "CashMargin": 2,               # 2 = Margin New Open (信用新規)
         "MarginTradeType": margin_trade_type,
-        "DelivType": 2,                # 2 = お預り金 (v17.0)
-        "FundType": "11",              # "11" = 信用取引 (v17.0)
+        "DelivType": 0,                # 0 = 指定なし (new-open uses 0; close uses 2)
+        "FundType": "11",              # "11" = 信用取引 (v17.1)
         "AccountType": 4,              # 4 = Specific account (特定口座)
         "Qty": TEST_QTY,
         "FrontOrderType": 10,          # 10 = Market order (成行)
@@ -147,14 +151,14 @@ def send_margin_new_order(token, margin_trade_type):
 def main():
     print("=" * 60)
     print("  sendorder Diagnosis: Margin New Open (CashMargin=2)")
-    print("  v17.0: Exchange=27, DelivType=2, FundType='11'")
+    print("  v17.1: Exchange=27, DelivType=0(新規)/2(返済), FundType='11'")
     print("=" * 60)
     print(f"\n  Symbol:  {TEST_SYMBOL}")
     print(f"  Exchange: {TEST_EXCHANGE} (東証+)")
     print(f"  Side:    BUY")
     print(f"  Qty:     {TEST_QTY} shares")
     print(f"  Order:   Market (成行)")
-    print(f"  DelivType: 2 (お預り金)")
+    print(f"  DelivType: 0 (指定なし — 新規注文用)")
     print(f"  FundType:  11 (信用取引)")
     print(f"  Tests:   {len(MTT_CANDIDATES)} MarginTradeType patterns")
 
