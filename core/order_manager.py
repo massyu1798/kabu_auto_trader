@@ -1,4 +1,4 @@
-"""Order / position manager (v17.0: hold_id from /positions, spec-aligned close)"""
+"""Order / position manager (v18.0: multi-lot hold_entries, spec-aligned close)"""
 
 import time
 from datetime import datetime, timedelta
@@ -21,6 +21,19 @@ _FILL_POLL_INTERVAL = 1.5
 
 
 @dataclass
+class HoldEntry:
+    """Single lot from /positions (ExecutionID-based).
+
+    Represents one execution fill. A single order may produce multiple
+    HoldEntry records when the order is filled in multiple lots (split fills).
+    """
+    hold_id: str       # ExecutionID from /positions (used as HoldID in ClosePositions)
+    qty: int           # LeavesQty from /positions
+    exchange: int      # Exchange from /positions
+    price: float = 0.0 # Price from /positions (informational)
+
+
+@dataclass
 class LivePosition:
     """Open position"""
     ticker: str
@@ -33,11 +46,29 @@ class LivePosition:
     trailing_stop: float
     exchange: int = 1      # board-derived exchange code (for INFO queries)
     order_exchange: int = 27  # exchange used in /sendorder (for close order)
-    hold_id: str = ""      # ExecutionID from /positions (for ClosePositions)
-    position_exchange: int = 0  # Exchange from /positions (for close order)
+    hold_entries: list = field(default_factory=list)  # list[HoldEntry]
     order_id: str = ""     # order ID from sendorder response
     reason: str = ""
     session: str = ""      # "AM" or "PM"
+
+    @property
+    def hold_id(self) -> str:
+        """Backward-compatible: return first hold_id or empty string."""
+        if self.hold_entries:
+            return self.hold_entries[0].hold_id
+        return ""
+
+    @property
+    def position_exchange(self) -> int:
+        """Backward-compatible: return first exchange or 0."""
+        if self.hold_entries:
+            return self.hold_entries[0].exchange
+        return 0
+
+    @property
+    def total_hold_qty(self) -> int:
+        """Total qty across all hold entries."""
+        return sum(e.qty for e in self.hold_entries)
 
 
 @dataclass
@@ -56,7 +87,7 @@ class LiveTrade:
 
 
 class OrderManager:
-    """Order / position manager (v17.0: hold_id + spec-aligned close)"""
+    """Order / position manager (v18.0: multi-lot hold_entries + spec-aligned close)"""
 
     def __init__(self, client: KabuClient, config: dict):
         self.client = client
@@ -95,32 +126,41 @@ class OrderManager:
                 return False
         return True
 
-    def _poll_hold_id(self, ticker: str, side: str) -> tuple[str, int]:
-        """Poll /positions to resolve hold_id (ExecutionID) after order fill.
+    def _poll_hold_entries(self, ticker: str, side: str) -> list:
+        """Poll /positions to resolve hold entries (ExecutionIDs) after order fill.
 
         Returns:
-            (hold_id, position_exchange) or ("", 0) if not found.
+            list[HoldEntry] — all matching lots, or [] if not found.
         """
         time.sleep(_FILL_POLL_DELAY)
 
         for attempt in range(1, _FILL_POLL_MAX + 1):
             hold_infos = self.client.resolve_position_hold_ids(ticker, side)
             if hold_infos:
-                # Use the latest (last) position entry
-                info = hold_infos[-1]
-                hold_id = info["hold_id"]
-                pos_exchange = info["exchange"]
-                print(f"  ✅ hold_id resolved: {ticker} -> ExecutionID={hold_id} "
-                      f"Exchange={pos_exchange} (attempt {attempt})")
-                return hold_id, pos_exchange
+                entries = [
+                    HoldEntry(
+                        hold_id=info["hold_id"],
+                        qty=info["qty"],
+                        exchange=info["exchange"],
+                        price=info.get("price", 0.0),
+                    )
+                    for info in hold_infos
+                ]
+                total_qty = sum(e.qty for e in entries)
+                ids_str = ", ".join(
+                    f"{e.hold_id}(x{e.qty}@Ex{e.exchange})" for e in entries
+                )
+                print(f"  ✅ hold_entries resolved: {ticker} -> {len(entries)} lot(s), "
+                      f"total_qty={total_qty} [{ids_str}] (attempt {attempt})")
+                return entries
 
             if attempt < _FILL_POLL_MAX:
-                print(f"  ⏳ hold_id not yet available for {ticker} "
+                print(f"  ⏳ hold_entries not yet available for {ticker} "
                       f"(attempt {attempt}/{_FILL_POLL_MAX})")
                 time.sleep(_FILL_POLL_INTERVAL)
 
-        print(f"  ⚠️ hold_id NOT resolved for {ticker} after {_FILL_POLL_MAX} attempts")
-        return "", 0
+        print(f"  ⚠️ hold_entries NOT resolved for {ticker} after {_FILL_POLL_MAX} attempts")
+        return []
 
     def entry(self, ticker: str, side: str, price: float,
               size: int, stop_loss: float, take_profit: float,
@@ -146,8 +186,10 @@ class OrderManager:
                 trailing_stop=stop_loss,
                 exchange=exchange,
                 order_exchange=exchange,
-                hold_id=f"PAPER_{ticker}_{int(time.time())}",
-                position_exchange=exchange,
+                hold_entries=[HoldEntry(
+                    hold_id=f"PAPER_{ticker}_{int(time.time())}",
+                    qty=size, exchange=exchange,
+                )],
                 reason=reason,
                 session=session,
             )
@@ -174,8 +216,8 @@ class OrderManager:
             if result and result.get("ok"):
                 order_id = result.get("order_id", "")
 
-                # Poll /positions to get ExecutionID (hold_id) for later close
-                hold_id, pos_exchange = self._poll_hold_id(ticker, side)
+                # Poll /positions to get ExecutionIDs (hold_entries) for later close
+                hold_entries = self._poll_hold_entries(ticker, side)
 
                 pos = LivePosition(
                     ticker=ticker, side=side,
@@ -186,16 +228,17 @@ class OrderManager:
                     exchange=exchange,
                     order_exchange=exchange,
                     order_id=order_id,
-                    hold_id=hold_id,
-                    position_exchange=pos_exchange if pos_exchange else exchange,
+                    hold_entries=hold_entries if hold_entries else [],
                     reason=reason,
                     session=session,
                 )
                 self.positions.append(pos)
                 self.daily_trade_count += 1
+                hold_id_display = pos.hold_id or "(none)"
+                n_lots = len(hold_entries)
                 print(f"  🔥 [LIVE] {side} {ticker} × {size}株 "
                       f"Exchange={exchange} MTT={mtt}({mtt_label}) "
-                      f"| OrderID={order_id} HoldID={hold_id}")
+                      f"| OrderID={order_id} HoldID={hold_id_display} lots={n_lots}")
                 return result
             else:
                 code = result.get('code', 0) if result else '?'
@@ -205,24 +248,58 @@ class OrderManager:
                     return result
                 return {"ok": False, "http": 0, "code": 0, "message": "no result from api"}
 
-    def _try_resolve_hold_id(self, pos: LivePosition) -> None:
-        """Attempt to resolve hold_id if it was not obtained during entry."""
-        if pos.hold_id and not pos.hold_id.startswith("PAPER"):
+    def _try_resolve_hold_entries(self, pos: LivePosition) -> None:
+        """Attempt to resolve hold_entries if they were not obtained during entry."""
+        if pos.hold_entries and not pos.hold_entries[0].hold_id.startswith("PAPER"):
             return  # already resolved
 
-        print(f"  🔄 Attempting late hold_id resolution for {pos.ticker}...")
-        hold_id, pos_exchange = self._poll_hold_id(pos.ticker, pos.side)
-        if hold_id:
-            pos.hold_id = hold_id
-            pos.position_exchange = pos_exchange
+        print(f"  🔄 Attempting late hold_entries resolution for {pos.ticker}...")
+        entries = self._poll_hold_entries(pos.ticker, pos.side)
+        if entries:
+            pos.hold_entries = entries
+
+    @staticmethod
+    def _build_close_positions(hold_entries: list, close_qty: int) -> tuple:
+        """Build ClosePositions list from hold_entries for the requested close_qty.
+
+        Allocates lots in order until close_qty is fulfilled.
+        Exchange is forced to 27 for all entries (unified rule).
+
+        Returns:
+            (close_positions_list, consumed) or (None, None) if insufficient qty.
+            close_positions_list: list of {"HoldID": str, "Qty": int}
+            consumed: list of (index, allocated_qty) for updating hold_entries
+        """
+        total_available = sum(e.qty for e in hold_entries)
+        if close_qty > total_available:
+            return None, None
+
+        close_positions = []
+        consumed = []  # (index, allocated_qty)
+        remaining = close_qty
+
+        for i, entry in enumerate(hold_entries):
+            if remaining <= 0:
+                break
+            alloc = min(entry.qty, remaining)
+            close_positions.append({"HoldID": entry.hold_id, "Qty": alloc})
+            consumed.append((i, alloc))
+            remaining -= alloc
+
+        if remaining > 0:
+            return None, None
+
+        return close_positions, consumed
 
     def exit(self, pos: LivePosition, current_price: float, reason: str) -> LiveTrade:
         """Close position.
 
         In LIVE mode:
-        - Sends margin close order via API
+        - Builds ClosePositions from multiple hold_entries
         - Only removes local position if API close succeeds
-        - Uses hold_id (ExecutionID) and position_exchange from /positions
+        - Uses hold_entries (ExecutionIDs) from /positions
+        - Exchange is unified to 27 (東証+) for close orders
+        - DelivType=0 for new-open, DelivType=2 for close (asymmetric rule)
         """
 
         now = datetime.now()
@@ -244,26 +321,39 @@ class OrderManager:
         )
 
         if not self.paper_mode:
-            # Try to resolve hold_id if missing
-            self._try_resolve_hold_id(pos)
+            # Try to resolve hold_entries if missing
+            self._try_resolve_hold_entries(pos)
 
-            if not pos.hold_id or pos.hold_id.startswith("PAPER"):
-                print(f"  ❌ [LIVE] Cannot close {pos.ticker}: no hold_id (ExecutionID)")
+            if not pos.hold_entries or pos.hold_entries[0].hold_id.startswith("PAPER"):
+                print(f"  ❌ [LIVE] Cannot close {pos.ticker}: no hold_entries (ExecutionIDs)")
                 print(f"     Position remains open. Manual intervention required.")
                 # DO NOT remove from self.positions — position is still open on exchange
                 return trade
 
+            # Build ClosePositions from hold_entries
+            close_positions, consumed = self._build_close_positions(
+                pos.hold_entries, pos.size
+            )
+
+            if close_positions is None:
+                total_hold = pos.total_hold_qty
+                print(f"  ❌ [LIVE] Cannot close {pos.ticker}: insufficient hold qty "
+                      f"(need={pos.size}, have={total_hold})")
+                print(f"     Position remains open. Manual intervention required.")
+                # DO NOT remove from self.positions — insufficient qty
+                return trade
+
             close_side = "SELL" if pos.side == "BUY" else "BUY"
 
-            # Use the Exchange from /positions (matches the actual position)
-            close_exchange = pos.position_exchange if pos.position_exchange else pos.order_exchange
+            # Exchange unified to 27 (東証+) for close orders
+            close_exchange = 27
 
             close_result = self.client.send_margin_close(
                 symbol=pos.ticker,
                 exchange=close_exchange,
                 side=close_side,
                 qty=pos.size,
-                hold_id=pos.hold_id,
+                close_positions=close_positions,
                 order_type=1,
                 margin_trade_type=self.margin_trade_type,
             )
@@ -271,16 +361,28 @@ class OrderManager:
             if not close_result or not close_result.get("ok"):
                 code = close_result.get("code", "?") if close_result else "?"
                 msg = close_result.get("message", "") if close_result else ""
+                cp_str = ", ".join(
+                    f"{cp['HoldID']}(x{cp['Qty']})" for cp in close_positions
+                )
                 print(f"  ❌ [LIVE] Close order FAILED for {pos.ticker}: "
                       f"code={code} {msg}")
-                print(f"     Exchange={close_exchange} HoldID={pos.hold_id}")
+                print(f"     Exchange={close_exchange} ClosePositions=[{cp_str}]")
                 print(f"     Position remains open. Manual intervention required.")
                 # DO NOT remove from self.positions — API close failed
                 return trade
 
+            # API success → update local hold_entries (consume allocated qty)
+            for idx, alloc_qty in consumed:
+                pos.hold_entries[idx].qty -= alloc_qty
+            # Remove fully consumed entries
+            pos.hold_entries = [e for e in pos.hold_entries if e.qty > 0]
+
+            cp_str = ", ".join(
+                f"{cp['HoldID']}(x{cp['Qty']})" for cp in close_positions
+            )
             print(f"  ✅ [LIVE] Close order accepted for {pos.ticker}: "
                   f"OrderID={close_result.get('order_id', '')} "
-                  f"Exchange={close_exchange} HoldID={pos.hold_id}")
+                  f"Exchange={close_exchange} ClosePositions=[{cp_str}]")
 
         mode_tag = "PAPER" if self.paper_mode else "LIVE"
         pnl_str = f"+{pnl:,.0f}" if pnl >= 0 else f"{pnl:,.0f}"
