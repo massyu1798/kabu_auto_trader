@@ -1,5 +1,5 @@
 """
-JP Stock Auto Trading Bot v15.4 - BT-aligned + dynamic Exchange + FundType fix
+JP Stock Auto Trading Bot v17.0 - spec-aligned margin orders + hold_id
 - Morning (9:05-11:00): EnsembleEngine (BUY + SELL) + daily bias filter
 - Afternoon (config entry_start-entry_end): AfternoonReversalEngine (BUY + SELL)
 - 5-min OHLCV bars from /board API
@@ -11,7 +11,8 @@ JP Stock Auto Trading Bot v15.4 - BT-aligned + dynamic Exchange + FundType fix
 - Force close: PM at force_close_time, all at market close
 - Cooldown: config-based bars (BT-aligned)
 - API error handling: blacklist, order throttle, break on 429
-- v15.4: Exchange from board (not hardcoded), FundType omitted
+- v17.0: Exchange=27 for new orders (issue #1072), DelivType=2,
+         FundType='11', hold_id from /positions, safe close flow
 """
 
 import math
@@ -32,7 +33,7 @@ from backtest.screener import screen_stocks
 # Minimum completed 5-min bars required for signal calculation
 MIN_BARS = 10
 
-VERSION = "v15.4"
+VERSION = "v17.0"
 
 # ============================================
 # Constants for API error handling / throttle
@@ -61,6 +62,11 @@ BLOCK_MINUTES_ONESHOT = 30
 
 # Block duration for unknown errors (minutes)
 BLOCK_MINUTES_UNKNOWN = 10
+
+# Default Exchange for new-open orders (per issue #1072)
+# Exchange=1 (東証) is DEPRECATED for new orders since 2026-02.
+# Use 27 (東証+) or 9 (SOR).
+DEFAULT_ORDER_EXCHANGE = 27
 
 
 def load_config():
@@ -364,12 +370,12 @@ def execute_entry_with_error_handling(
     session: str,
     blacklist: TickerBlacklist,
     now_str: str,
-    exchange: int = 1,
+    exchange: int = DEFAULT_ORDER_EXCHANGE,
 ) -> str:
     """Execute entry with error-code-based handling.
 
     Args:
-        exchange: board-derived exchange code.
+        exchange: Exchange for new-open sendorder (default: 27=東証+).
     """
 
     time.sleep(ORDER_INTERVAL_SEC)
@@ -590,7 +596,7 @@ def main():
     signal_check_count = 0
     current_day = None
 
-    # v15.4: per-ticker Exchange from board (dynamic, not hardcoded)
+    # per-ticker Exchange from board (for /board info queries only)
     ticker_exchange: dict[str, int] = {}
 
     ensemble_cfg = strat_cfg["ensemble"]
@@ -598,7 +604,7 @@ def main():
     pm_initial_capital = float(afternoon_cfg["global"]["initial_capital"]) if afternoon_cfg else am_initial_capital
 
     print(f"\n{'='*60}")
-    print(f"Bot running... ({VERSION} BT-aligned + dynamic Exchange)")
+    print(f"Bot running... ({VERSION} spec-aligned margin + hold_id)")
     print(f"{'='*60}")
     print(f"  Watchlist: {len(watchlist)} stocks (screener={'ON' if use_screener else 'OFF'})")
     print(f"  AM Initial capital: {am_initial_capital:,.0f}")
@@ -612,8 +618,14 @@ def main():
     print(f"    margin_trade_type:          {live_mtt} ({live_mtt_label})")
     print(f"  Max orders/check: AM={MAX_ORDERS_PER_CHECK_AM} PM={MAX_ORDERS_PER_CHECK_PM}")
     print(f"  Order interval: {ORDER_INTERVAL_SEC}s")
-    print(f"  Exchange: dynamic (from /board)")
-    print(f"  FundType: omitted (API auto-determine)")
+    print(f"  ── Order params (v17.0) ──")
+    print(f"    Exchange (new-open):  {DEFAULT_ORDER_EXCHANGE} (東証+)")
+    print(f"    Exchange (close):     from /positions (match actual position)")
+    print(f"    DelivType:            2 (お預り金)")
+    print(f"    FundType:             11 (信用取引)")
+    print(f"    AccountType:          4 (特定口座)")
+    print(f"    MarginTradeType:      {live_mtt} ({live_mtt_label})")
+    print(f"    HoldID:               from /positions ExecutionID")
     print(f"  [AM] Entry: 9:05-11:00 | buy_thr={ensemble_cfg['buy_threshold']} sell_thr={ensemble_cfg['sell_threshold']}")
     print(f"       SL: {strat_cfg['exit']['stop_loss_atr_multiplier']} ATR | TP: {strat_cfg['exit']['take_profit_rr_ratio']} R:R")
     print(f"       Daily bias: EMA {strat_cfg.get('daily_bias',{}).get('ema_short',5)}/{strat_cfg.get('daily_bias',{}).get('ema_long',25)} (BEAR=disabled)")
@@ -673,13 +685,12 @@ def main():
                         order_mgr.exit(pos, current, f"時間決済({pm_force_close})")
 
             # Fetch /board and build 5-min bars
-            # v15.4: store Exchange from board response
+            # Store Exchange from board (for info/display only — NOT for sendorder)
             for ticker in watchlist:
                 try:
                     board = client.get_board(ticker)
                     if board and board.get("CurrentPrice"):
                         bar_builder.update(ticker, board)
-                        # Store Exchange from board (dynamic)
                         if "Exchange" in board:
                             ticker_exchange[ticker] = int(board["Exchange"])
                 except Exception as e:
@@ -736,7 +747,7 @@ def main():
                             bl_tag = " [BLOCKED]" if blacklist.is_blocked(ticker) else ""
                             exch = ticker_exchange.get(ticker, "?")
                             print(f"    {ticker}: price={last_price:.0f} bars={n_bars}/{MIN_BARS} "
-                                  f"exchange={exch} [{ready}]{bl_tag}")
+                                  f"board_exchange={exch} order_exchange={DEFAULT_ORDER_EXCHANGE} [{ready}]{bl_tag}")
                         if len(watchlist) > 15:
                             print(f"    ... and {len(watchlist)-15} more stocks")
 
@@ -831,8 +842,9 @@ def main():
                         stop_loss, take_profit, trailing_stop = calc_entry_params(
                             signal, entry_price, sl_dist, tp_dist)
 
-                        # v15.4: use board-derived exchange
-                        exch = ticker_exchange.get(ticker, 1)
+                        # v17.0: Always use DEFAULT_ORDER_EXCHANGE for new-open orders
+                        # (board Exchange is for info only, not for sendorder)
+                        exch = DEFAULT_ORDER_EXCHANGE
                         notional = entry_price * size
                         print(f"  [{now_str}] [AM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
                               f"size={size} notional={notional:,.0f} exchange={exch} "
@@ -922,8 +934,8 @@ def main():
                         stop_loss, take_profit, trailing_stop = calc_entry_params(
                             signal, entry_price, sl_dist, tp_dist)
 
-                        # v15.4: use board-derived exchange
-                        exch = ticker_exchange.get(ticker, 1)
+                        # v17.0: Always use DEFAULT_ORDER_EXCHANGE for new-open orders
+                        exch = DEFAULT_ORDER_EXCHANGE
                         notional = entry_price * size
                         print(f"  [{now_str}] [PM] >>> ENTRY {signal} {ticker}: price={entry_price:.0f} "
                               f"size={size} notional={notional:,.0f} exchange={exch} "
