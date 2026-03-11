@@ -5,6 +5,7 @@
 global:
   initial_capital: 7000000
   max_positions: 5
+  combined_max_positions: 2
   risk_per_trade: 0.008
   max_daily_loss: 0.03
   commission_rate: 0.0
@@ -76,3 +77,8 @@ cooldown:
 trend_filter:
   enabled: true
   ema_period: 60
+
+live_risk_caps:
+  max_notional_per_position: 3000000
+  max_total_exposure: 6000000
+  safety_margin_ratio: 0.98

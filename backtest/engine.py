@@ -77,6 +77,12 @@ class BacktestEngine:
         self.trend_filter_enabled = tf.get("enabled", False)
         self.trend_ema_period = tf.get("ema_period", 60)
 
+        # リスク上限（本番との整合性）: live_risk_caps はオプショナル
+        rc = self.config.get("live_risk_caps", {})
+        self.max_notional_per_position = rc.get("max_notional_per_position", None)
+        self.max_total_exposure = rc.get("max_total_exposure", None)
+        self.safety_margin_ratio = rc.get("safety_margin_ratio", 0.98)
+
     def _is_market_close(self, timestamp):
         if not hasattr(timestamp, "hour"):
             return False
@@ -88,11 +94,11 @@ class BacktestEngine:
         return timestamp.hour >= 14 and timestamp.minute >= 30
 
     def _is_morning_session(self, timestamp):
-        """v12.4: 9:00〜11:00のみエントリー許可"""
+        """v12.4: 9:05〜11:00のみエントリー許可（本番に合わせて9:05開始）"""
         if not hasattr(timestamp, "hour"):
             return True
         t = timestamp.hour * 100 + timestamp.minute
-        return 900 <= t <= 1100
+        return 905 <= t <= 1100
 
     def _close_position(self, pos, current_price, date, reason):
         if pos.side == Side.LONG:
@@ -283,8 +289,8 @@ class BacktestEngine:
 
                     risk_amount = capital * self.risk_per_trade
                     sl_distance = atr_val * self.sl_atr_mult
-                    size = int(risk_amount / sl_distance)
-                    if size <= 0:
+                    size = (int(risk_amount / sl_distance) // 100) * 100
+                    if size < 100:
                         continue
 
                     position_value = close * size
@@ -293,6 +299,27 @@ class BacktestEngine:
                     ) + position_value
                     if total_exposure > self.initial_capital:
                         continue
+
+                    # per-position / total exposure キャップ（live_risk_capsが設定されている場合）
+                    if self.max_notional_per_position is not None:
+                        effective_per_pos = self.max_notional_per_position * self.safety_margin_ratio
+                        if position_value > effective_per_pos:
+                            max_size_by_cap = (int(effective_per_pos / close) // 100) * 100
+                            if max_size_by_cap < 100:
+                                continue
+                            size = max_size_by_cap
+                            position_value = close * size
+
+                    if self.max_total_exposure is not None:
+                        effective_total = self.max_total_exposure * self.safety_margin_ratio
+                        current_exposure = sum(p.entry_price * p.size for p in positions)
+                        if current_exposure + position_value > effective_total:
+                            remaining = effective_total - current_exposure
+                            max_size_by_total = (int(remaining / close) // 100) * 100
+                            if max_size_by_total < 100:
+                                continue
+                            size = max_size_by_total
+                            position_value = close * size
 
                     if signal == "BUY":
                         entry_price = close * (1 + self.slippage_rate)
