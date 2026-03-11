@@ -35,25 +35,48 @@ trade:
 #
 # margin_order:
 #   exchange: 27          # 東証+（2026-02以降 Exchange=1 は新規不可、issue #1072）
+#                         # ※ 新規注文の Exchange は 27 を使う
 #   deliv_type_open: 0    # 受渡区分(新規): 指定なし
 #   deliv_type_close: 2   # 受渡区分(返済): お預り金
 #   fund_type: "11"       # 資産区分: 信用取引
 #   account_type: 4       # 口座種別: 特定口座
 #
-# 返済注文の Exchange は 27 (東証+) に統一されます。
-# 返済注文の ClosePositions には複数建玉 (分割約定) も自動対応します。
-# HoldID は /positions の ExecutionID を使用します。
-# issue #1072: Exchange=1 で建てた建玉は Exchange=1 でのみ返済可。
-#              Exchange=27 で建てた建玉は Exchange=27 でのみ返済可。
-#              本システムは新規・返済ともに Exchange=27 を使用します。
+# [返済注文の Exchange について]
+#   返済注文の Exchange は、新規注文時の固定値(27)ではなく、
+#   /positions から取得した建玉(hold_entries)の Exchange を使用します。
+#   建玉の Exchange が複数混在している場合（例: 一部が 1、一部が 27）は、
+#   安全のため返済を拒否します（order_manager.py で実装済み）。
+#
+#   Exchange 対応まとめ:
+#     新規注文 → Exchange=27 固定（東証+、issue #1072 準拠）
+#     返済注文 → /positions の建玉 Exchange を使用
+#     建玉 Exchange 混在 → 返済拒否（要手動確認）
+#
+# [issue #1072 参考]
+#   Exchange=1 で建てた建玉は Exchange=1 でのみ返済可。
+#   Exchange=27 で建てた建玉は Exchange=27 でのみ返済可。
+#   本システムは新規を Exchange=27 で統一しているため、
+#   通常の返済も Exchange=27 になります。
+#
+# HoldID は /positions の ExecutionID を使用します（複数建玉・分割約定対応）。
 
 # 現物（spot）注文設定
-# test_spot_minimal.py で正しい組み合わせを特定してから設定してください
+#
+# [口座実測結果]
+#   Exchange=27 / DelivType=2 / FundType="AA" → 成功
+#   Exchange=27 / DelivType=2 / FundType="02" → エラー 100031（口座によっては不可）
+#
+# [設定方針]
+#   FundType="AA"（信用代用有価証券）を推奨します。
+#   ただし口座設定によって異なるため、必ず test_spot_minimal.py で
+#   事前に正しい組み合わせを確認してから本番設定に反映してください。
+#
 # deliv_type: 2=預り金（デフォルト・推奨）
-# fund_type:  省略推奨。必要な場合は "02"(保護預り) / "AA"(信用代用) / "11"(お預り金)
+# fund_type:  "AA"(信用代用 ← 実測で成功) / "02"(保護預り ← 口座によっては不可)
 spot:
   deliv_type: 2
-  # fund_type: "02"              # 省略時はAPIデフォルト（多くの場合これでOK）
+  fund_type: "AA"              # 口座実測: "AA" 成功 / "02" → 100031 エラー
+                               # 変更前に test_spot_minimal.py で必ず事前確認すること
 
 # screener設定
 # enabled=true の場合、起動時に screen_stocks() を実行しBTと同じ銘柄を自動選定
