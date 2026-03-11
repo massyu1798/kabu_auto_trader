@@ -74,6 +74,12 @@ class AfternoonBacktestEngine:
         self.cooldown_bars_loss = cd.get("bars_after_loss", 6)
         self.cooldown_bars_win = cd.get("bars_after_win", 0)
 
+        # リスク上限（本番との整合性）: live_risk_caps はオプショナル
+        rc = self.config.get("live_risk_caps", {})
+        self.max_notional_per_position = rc.get("max_notional_per_position", None)
+        self.max_total_exposure = rc.get("max_total_exposure", None)
+        self.safety_margin_ratio = rc.get("safety_margin_ratio", 0.98)
+
     def _get_time_int(self, timestamp):
         if not hasattr(timestamp, "hour"):
             return 0
@@ -102,7 +108,7 @@ class AfternoonBacktestEngine:
             entry_reason=pos.reason, exit_reason=reason,
         )
 
-    def run(self, signals_dict: dict[str, pd.DataFrame]) -> BacktestResult:
+    def run(self, signals_dict: dict[str, pd.DataFrame], am_open_per_day: dict = None) -> BacktestResult:
         capital = self.initial_capital
         positions: list[Position] = []
         trades: list[Trade] = []
@@ -228,6 +234,7 @@ class AfternoonBacktestEngine:
                 positions.remove(pos)
 
             # === 2. 新規エントリー ===
+            am_used = (am_open_per_day or {}).get(day, 0)
             if (
                 not is_force_close
                 and not is_market_close
@@ -236,7 +243,7 @@ class AfternoonBacktestEngine:
                 for ticker, df in signals_dict.items():
                     if date not in df.index:
                         continue
-                    if len(positions) >= self.max_positions:
+                    if len(positions) + am_used >= self.max_positions:
                         break
                     if any(p.ticker == ticker for p in positions):
                         continue
@@ -259,8 +266,8 @@ class AfternoonBacktestEngine:
 
                     risk_amount = capital * self.risk_per_trade
                     sl_distance = atr_val * self.sl_atr_mult
-                    size = int(risk_amount / sl_distance)
-                    if size <= 0:
+                    size = (int(risk_amount / sl_distance) // 100) * 100
+                    if size < 100:
                         continue
 
                     position_value = close * size
@@ -269,6 +276,27 @@ class AfternoonBacktestEngine:
                     ) + position_value
                     if total_exposure > self.initial_capital:
                         continue
+
+                    # per-position / total exposure キャップ（live_risk_capsが設定されている場合）
+                    if self.max_notional_per_position is not None:
+                        effective_per_pos = self.max_notional_per_position * self.safety_margin_ratio
+                        if position_value > effective_per_pos:
+                            max_size_by_cap = (int(effective_per_pos / close) // 100) * 100
+                            if max_size_by_cap < 100:
+                                continue
+                            size = max_size_by_cap
+                            position_value = close * size
+
+                    if self.max_total_exposure is not None:
+                        effective_total = self.max_total_exposure * self.safety_margin_ratio
+                        current_exposure = sum(p.entry_price * p.size for p in positions)
+                        if current_exposure + position_value > effective_total:
+                            remaining = effective_total - current_exposure
+                            max_size_by_total = (int(remaining / close) // 100) * 100
+                            if max_size_by_total < 100:
+                                continue
+                            size = max_size_by_total
+                            position_value = close * size
 
                     if signal == "BUY":
                         entry_price = close * (1 + self.slippage_rate)

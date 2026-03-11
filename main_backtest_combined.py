@@ -206,6 +206,9 @@ def main():
 
     initial_capital = morning_config["global"]["initial_capital"]
 
+    # combined_max_positions: AM/PMで共有するポジション上限（本番との整合）
+    combined_max_positions = morning_config["global"].get("combined_max_positions", None)
+
     # === 銘柄スクリーニング ===
     print("\n■ 銘柄スクリーニング...")
     selected = screen_stocks(morning_config)
@@ -250,12 +253,36 @@ def main():
     # 午前
     print("  [午前 v12.4] 実行中...")
     morning_engine = BacktestEngine("config/strategy_config.yaml")
+    if combined_max_positions is not None:
+        morning_engine.max_positions = combined_max_positions
+        print(f"  -> combined_max_positions={combined_max_positions} を適用（AM）")
     morning_result = morning_engine.run(morning_signals)
+
+    # AM終了後、PM開始時点（12:30）でまだオープンしているAMポジション数を集計
+    # → PM側がスロットを適切に空けるための情報として渡す
+    def _count_am_positions_held_into_pm(morning_trades, pm_start=1230):
+        """AMポジションのうちPMセッション開始時刻（12:30）以降も保有していたものを日付別に集計"""
+        from collections import defaultdict
+        counts = defaultdict(int)
+        for trade in morning_trades:
+            exit_t = trade.exit_date
+            if not hasattr(exit_t, "hour"):
+                continue
+            exit_time_int = exit_t.hour * 100 + exit_t.minute
+            if exit_time_int >= pm_start:
+                day = exit_t.date() if hasattr(exit_t, "date") else exit_t
+                counts[day] += 1
+        return dict(counts)
+
+    am_open_at_pm = _count_am_positions_held_into_pm(morning_result.trades)
 
     # 午後
     print("  [午後 リバーサル v1.2] 実行中...")
     afternoon_engine = AfternoonBacktestEngine("config/afternoon_config.yaml")
-    afternoon_result = afternoon_engine.run(afternoon_signals)
+    if combined_max_positions is not None:
+        afternoon_engine.max_positions = combined_max_positions
+        print(f"  -> combined_max_positions={combined_max_positions} を適用（PM）")
+    afternoon_result = afternoon_engine.run(afternoon_signals, am_open_per_day=am_open_at_pm)
 
     # === 合算 ===
     all_trades = morning_result.trades + afternoon_result.trades

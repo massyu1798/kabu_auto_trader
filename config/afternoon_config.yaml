@@ -52,3 +52,8 @@ cooldown:
   enabled: true
   bars_after_loss: 6
   bars_after_win: 2
+
+live_risk_caps:
+  max_notional_per_position: 3000000
+  max_total_exposure: 6000000
+  safety_margin_ratio: 0.98
