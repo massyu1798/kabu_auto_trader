@@ -7,6 +7,7 @@ from strategy.trend_follow import TrendFollow
 from strategy.mean_reversion import MeanReversion
 from strategy.breakout import Breakout
 from strategy.volume_profile import VolumeProfile
+from strategy.overnight_gap import OvernightGap
 
 
 # === 戦略レジストリ ===
@@ -15,6 +16,7 @@ STRATEGY_REGISTRY = {
     "mean_reversion": MeanReversion,
     "breakout": Breakout,
     "volume_profile": VolumeProfile,
+    "overnight_gap": OvernightGap,
 }
 
 
