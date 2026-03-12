@@ -1,4 +1,4 @@
-"""バックテストエンジン v12.4: 加速TS + 11:00エン��リー制限"""
+"""バックテストエンジン v12.5: 9:05〜14:00エントリー許可 + max_positions=8"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -93,12 +93,12 @@ class BacktestEngine:
             return False
         return timestamp.hour >= 14 and timestamp.minute >= 30
 
-    def _is_morning_session(self, timestamp):
-        """v12.4: 9:05〜11:00のみエントリー許可（本番に合わせて9:05開始）"""
+    def _is_entry_allowed(self, timestamp):
+        """9:05〜14:00 をエントリー許可時間帯に変更（後場前半まで許可）"""
         if not hasattr(timestamp, "hour"):
             return True
         t = timestamp.hour * 100 + timestamp.minute
-        return 905 <= t <= 1100
+        return 905 <= t <= 1400
 
     def _close_position(self, pos, current_price, date, reason):
         if pos.side == Side.LONG:
@@ -251,7 +251,7 @@ class BacktestEngine:
             if (
                 not is_close_time
                 and not is_cutoff
-                and self._is_morning_session(date)
+                and self._is_entry_allowed(date)
                 and abs(daily_loss) < self.initial_capital * self.max_daily_loss
             ):
                 for ticker, df in signals_dict.items():

@@ -78,14 +78,14 @@ def apply_v11_filter(signals_df, daily_bias):
 def apply_v12_filters(signals_df):
     """
     v12フィルター:
-    1. 時間帯フィルター: 9:05〜11:00 以外はHOLD
-    2. VWAPフィルター: VWAP���下での買いはHOLD
+    1. 時間帯フィルター: 9:05〜14:00 以外はHOLD（後場前半まで許可）
+    2. VWAPフィルター: VWAP以下での買いはHOLD
     """
     result = signals_df.copy()
     for idx in result.index:
         # 1. 時間帯フィルター
         t = idx.hour * 100 + idx.minute
-        if not (905 <= t <= 1100):
+        if not (905 <= t <= 1400):
             result.loc[idx, "final_signal"] = "HOLD"
             continue
 
