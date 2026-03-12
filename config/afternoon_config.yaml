@@ -1,51 +1,43 @@
 # ============================================
-# 午後リバーサル戦略パラメータ v1.2
-# v1.0ベース + SLタイト化 + TP近接化
-# v13: initial_capital 700万
+# 午後リバーサル戦略パラメータ v14
+# 保証金300万 × レバレッジ3倍 = 建玉上限 1000万円
 # ============================================
 
 global:
-  initial_capital: 7000000
+  initial_capital: 10000000
+  margin_capital: 3333333
+  leverage: 3.0
   max_positions: 3
-  risk_per_trade: 0.006
+  risk_per_trade: 0.008
   max_daily_loss: 0.02
   commission_rate: 0.0
   slippage_rate: 0.001
 
 screening:
   enabled: true
-  min_volume: 200000
+  min_volume: 300000
   min_price: 500
-  max_price: 40000
-  min_atr_pct: 0.7
+  max_price: 50000
+  min_atr_pct: 0.8
   max_stocks: 60
 
 afternoon_reversal:
-  # エントリー時間帯
   entry_start: 1230
   entry_end: 1400
-
-  # 午前変動率フィルター
-  min_morning_move_pct: 1.5       # v1.0に戻す
-
-  # RSI��定
+  min_morning_move_pct: 1.5
   rsi_period: 14
-  rsi_oversold: 25                # v1.0に戻す
-  rsi_overbought: 75              # v1.0に戻す
-
-  # ボリンジャーバンド設定
+  rsi_oversold: 25
+  rsi_overbought: 75
   bb_period: 20
-  bb_std: 2.0                     # v1.0に戻す
-
-  # 出来高フィルター
+  bb_std: 2.0
   volume_surge_ratio: 1.3
 
 exit:
   atr_period: 14
-  stop_loss_atr_multiplier: 1.2   # 逆張り失敗時の損失を早めに��ット
-  take_profit_atr_multiplier: 1.5 # 利確を近くして勝率UP
+  stop_loss_atr_multiplier: 1.2
+  take_profit_atr_multiplier: 1.5
   trailing_stop: true
-  trailing_atr_multiplier: 1.5    # v1.0に戻す
+  trailing_atr_multiplier: 1.5
   force_close_time: 1450
 
 cooldown:
@@ -54,6 +46,6 @@ cooldown:
   bars_after_win: 2
 
 live_risk_caps:
-  max_notional_per_position: 3000000
-  max_total_exposure: 6000000
-  safety_margin_ratio: 0.98
+  max_notional_per_position: 1500000
+  max_total_exposure: 10000000
+  safety_margin_ratio: 0.95
