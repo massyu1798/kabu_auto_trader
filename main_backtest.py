@@ -1,5 +1,5 @@
 """
-バックテスト v15: 3戦略マルチストラテジー
+バックテスト v16: 3戦略マルチストラテジー
 - MR (ミーンリバージョン): 9:30〜14:30, VWAP回帰エグジット
 - BO (ブレイクアウト): 分割決済 + ORB復帰損切り
 - ONG (オーバーナイト・ギャップ): 日足独立ループ, 引け買い→翌朝寄り決済
@@ -85,9 +85,10 @@ def apply_v11_filter(signals_df, daily_bias):
 
 def apply_v15_filters(signals_df):
     """
-    v15フィルター:
-    1. 時間帯フィルター: 9:30〜14:30 以外はHOLD（寄り30分の乱高下を回避）
-    2. VWAPフィルター: VWAP以下での買いはHOLD
+    v16フィルター:
+    1. 時間帯フィルター: 9:30〜14:30 以外はHOLD
+    2. VWAPフィルター: BO-BUYのみ close < vwap でHOLD（MR-BUYは許可）
+    3. SHORT全面禁止: SELL → HOLD
     """
     result = signals_df.copy()
     for idx in result.index:
@@ -97,11 +98,22 @@ def apply_v15_filters(signals_df):
             result.loc[idx, "final_signal"] = "HOLD"
             continue
 
-        # 2. VWAPフィルター
+        # 2. SHORT全面禁止（v16: 勝率25%のため当面停止）
+        if result.loc[idx, "final_signal"] == "SELL":
+            result.loc[idx, "final_signal"] = "HOLD"
+            continue
+
+        # 3. VWAPフィルター（BO-BUYのみ適用、MR-BUYは除外）
         if result.loc[idx, "final_signal"] == "BUY":
             if "vwap" in result.columns and not pd.isna(result.loc[idx, "vwap"]):
                 if result.loc[idx, "close"] < result.loc[idx, "vwap"]:
-                    result.loc[idx, "final_signal"] = "HOLD"
+                    # BOが支配的かMRと同等の場合はHOLD、MRが支配的な場合は逆張り買いを許可
+                    mr_score = abs(float(result.loc[idx].get("MeanReversion_score", 0) or 0))
+                    bo_score = abs(float(result.loc[idx].get("Breakout_score", 0) or 0))
+                    if mr_score <= bo_score:
+                        # BOが支配的（またはスコア同等） → VWAP下での買い禁止
+                        result.loc[idx, "final_signal"] = "HOLD"
+                    # else: MRが支配的 → VWAP下での逆張り買いOK
 
     return result
 
@@ -182,7 +194,7 @@ def run_ong_backtest(tickers: list, config: dict) -> list:
 
 def main():
     print("=" * 60)
-    print("  🌅 日本株自動売買 v15: 3戦略マルチストラテジー")
+    print("  🌅 日本株自動売買 v16: 3戦略マルチストラテジー")
     print("=" * 60)
 
     with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
@@ -208,16 +220,19 @@ def main():
         bias = calc_daily_bias(df_daily, config)
         signals_df = ensemble.generate_ensemble_signals(df_5m)
         signals_df = apply_v11_filter(signals_df, bias)
-        signals_df = apply_v15_filters(signals_df)       # ★ v15フィルター（9:30〜14:30）
+        signals_df = apply_v15_filters(signals_df)       # ★ v16フィルター（9:30〜14:30、SHORT禁止、VWAP戦略別）
+
+        # MR用: vwap_z, vwapをsignals_dfに引き継ぎ（ORB計算とは独立）
+        if "vwap_z" in df_5m.columns:
+            signals_df["vwap_z"] = df_5m["vwap_z"]
+        if "vwap" in df_5m.columns:
+            signals_df["vwap"] = df_5m["vwap"]
 
         # BO用: ORBレンジをsignals_dfに追加（エンジンのORB復帰損切りに使用）
         try:
             orb_df = bo_helper._calc_orb(df_5m, minutes=orb_minutes)
             signals_df["orb_high"] = orb_df["orb_high"]
             signals_df["orb_low"] = orb_df["orb_low"]
-            # MR用: vwap_zをsignals_dfに引き継ぎ
-            if "vwap_z" in df_5m.columns:
-                signals_df["vwap_z"] = df_5m["vwap_z"]
         except Exception:
             pass
 
@@ -253,7 +268,7 @@ def main():
         print(f"  📊 トータル勝率: {(len(win_trades)/len(all_trades)*100):.1f}%")
 
     plot_equity_curve(result, engine.initial_capital)
-    print("\n✅ v15 テスト完了。")
+    print("\n✅ v16 テスト完了。")
 
 if __name__ == "__main__":
     main()
