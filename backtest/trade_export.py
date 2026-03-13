@@ -35,11 +35,30 @@ def _safe_ts(val) -> str:
 
 
 def _safe_date(val):
-    """Extract date from datetime-like, return as datetime.date."""
+    """Extract date from datetime-like, return as datetime.date.
+
+    Returns None for None, NaT, and any un-parseable value so that the
+    'day' column never contains pd.NaT (which pandas 3.x stores as a
+    float NaN in object columns, causing Series.max() to raise TypeError).
+    """
     if val is None:
         return None
+    # pandas NaT check must come before hasattr("date") because NaT has .date()
+    # but NaT.date() returns NaT (not a real date).
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
     if hasattr(val, "date"):
-        return val.date()
+        result = val.date()
+        # pd.NaT.date() returns NaT – treat that as None
+        try:
+            if pd.isna(result):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return result
     try:
         return pd.Timestamp(val).date()
     except Exception:
@@ -123,7 +142,12 @@ def build_daily_pnl(df: pd.DataFrame, last_days: int | None = None) -> pd.DataFr
     if df.empty:
         return pd.DataFrame()
 
-    grouped = df.groupby(["day", "session"]).agg(
+    # Drop rows where 'day' is None/NaT to avoid groupby/pivot issues
+    df_valid = df.dropna(subset=["day"])
+    if df_valid.empty:
+        return pd.DataFrame()
+
+    grouped = df_valid.groupby(["day", "session"]).agg(
         pnl=("pnl", "sum"),
         cnt=("pnl", "count"),
     ).reset_index()
@@ -176,7 +200,12 @@ def get_latest_day_summary(df: pd.DataFrame) -> dict:
     if df.empty:
         return {}
 
-    latest = df["day"].max()
+    # Drop rows where 'day' is None/NaT to avoid TypeError in pandas 3.x
+    # (object column with mixed None/datetime.date causes max() to raise)
+    valid_days = df["day"].dropna()
+    if valid_days.empty:
+        return {}
+    latest = valid_days.max()
     latest_df = df[df["day"] == latest]
 
     am = latest_df[latest_df["session"] == "AM"]
