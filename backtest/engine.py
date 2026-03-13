@@ -125,18 +125,16 @@ class BacktestEngine:
         return 930 <= t <= 1430
 
     def _get_strategy_tag(self, row) -> str:
-        """シグナル行の個別戦略スコアからどの戦略が支配的かを判定"""
-        weighted = {
-            "mean_reversion": abs(float(row.get("MeanReversion_score") or 0)) * 2.5,
-            "breakout": abs(float(row.get("Breakout_score") or 0)) * 1.5,
-        }
-        best_tag = ""
-        best_val = 0.0
-        for tag, val in weighted.items():
-            if val > best_val:
-                best_val = val
-                best_tag = tag
-        return best_tag
+        """シグナル行の個別戦略スコアからどの戦略が支配的かを判定（v17: デフォルトMR）"""
+        mr_score = abs(float(row.get("MeanReversion_score") or 0))
+        bo_score = abs(float(row.get("Breakout_score") or 0))
+
+        # BO が明確に支配的な場合のみBOタグ（MRの1.5倍以上のスコア）
+        if bo_score > 0 and bo_score * 1.5 > mr_score * 2.5:
+            return "breakout"
+
+        # デフォルトはMR（主力戦略）
+        return "mean_reversion"
 
     def _close_position(self, pos, current_price, date, reason, close_size=None):
         size = close_size if close_size is not None else pos.size
