@@ -1,8 +1,8 @@
-"""戦略① VWAP乖離ミーンリバージョン v14
-- RSI + ボリンジャーバンド + VWAP乖離の複合シグナル
+"""戦略① VWAP乖離ミーンリバージョン v18
+- RSI + ボリンジャーバンド + VWAP乖離の複合シグナル（AND条件化）
 - 買い(LONG) & 売り(SHORT) 双方向対応
-- 出来高急増でセリングクライマックス/バイイングクライマックスを検知
-- RSIグラデーション（段階的スコア）
+- 3条件のうち2条件以上の同時成立でシグナル発行（質の低いシグナルを排除）
+- 出来高確認をエントリー必須条件に変更（板の薄い場面のダマシを回避）
 - BBスクイーズ時はシグナルを抑制
 """
 
@@ -88,6 +88,7 @@ class MeanReversion(StrategyBase):
         vwap_threshold = p.get("vwap_deviation_threshold", 1.2)
         rsi_oversold = p.get("rsi_oversold", 30)
         rsi_overbought = p.get("rsi_overbought", 70)
+        has_vwap_z = use_vwap and "vwap_z" in df.columns
 
         signals = []
         for i in range(len(df)):
@@ -108,53 +109,67 @@ class MeanReversion(StrategyBase):
                     signals.append(Signal(0, "BB_Squeeze"))
                     continue
 
-            # 出来高チェック
+            # 出来高チェック（エントリー必須条件）
             vol_ok = (
                 not pd.isna(df["vol_ma"].iloc[i])
                 and df["vol_ma"].iloc[i] > 0
                 and df["volume"].iloc[i] > df["vol_ma"].iloc[i] * vol_ratio
             )
 
+            # 出来高条件を満たさない場合はシグナルなし（板の薄い場面のダマシを回避）
+            if not vol_ok:
+                signals.append(Signal(0, "NoVol"))
+                continue
+
             score = 0.0
             reasons = []
 
-            # === 買いシグナル（売られすぎ → 反発期待） ===
+            # === 買いシグナル（売られすぎ → 反発期待）: 3条件のうち2条件以上で発行 ===
+            buy_conditions = 0
+            buy_reasons = []
+
             rsi_buy = self._rsi_buy_score(rsi, rsi_oversold)
             if rsi_buy > 0:
-                score += rsi_buy * 0.5
-                reasons.append(f"RSI={rsi:.0f}")
+                buy_conditions += 1
+                buy_reasons.append(f"RSI={rsi:.0f}")
 
             if close <= bb_lower:
-                score += 0.5
-                reasons.append("BB_Low")
+                buy_conditions += 1
+                buy_reasons.append("BB_Low")
 
-            if use_vwap and not pd.isna(df["vwap_z"].iloc[i]):
-                if df["vwap_z"].iloc[i] <= -vwap_threshold:
-                    score += 0.5
-                    reasons.append(f"VWAP_Z={df['vwap_z'].iloc[i]:.1f}")
+            vwap_z = df["vwap_z"].iloc[i] if has_vwap_z else float("nan")
+            if has_vwap_z and not pd.isna(vwap_z) and vwap_z <= -vwap_threshold:
+                buy_conditions += 1
+                buy_reasons.append(f"VWAP_Z={vwap_z:.1f}")
 
-            if vol_ok and score > 0:
-                score += 0.3
-                reasons.append("VolConfirm")
+            if buy_conditions >= 2:
+                score = 0.5 * buy_conditions  # 2条件=1.0, 3条件=1.5
+                if buy_conditions == 3:
+                    score += 0.3  # 3条件ボーナス（高確度シグナル）
+                reasons = buy_reasons + ["VolOK"]
+            else:
+                # === 売りシグナル（買われすぎ → 反落期待）: 3条件のうち2条件以上で発行 ===
+                sell_conditions = 0
+                sell_reasons = []
 
-            # === 売りシグナル（買われすぎ → 反落期待） ===
-            rsi_sell = self._rsi_sell_score(rsi, rsi_overbought)
-            if rsi_sell > 0:
-                score -= rsi_sell * 0.5
-                reasons.append(f"RSI={rsi:.0f}")
+                rsi_sell = self._rsi_sell_score(rsi, rsi_overbought)
+                if rsi_sell > 0:
+                    sell_conditions += 1
+                    sell_reasons.append(f"RSI={rsi:.0f}")
 
-            if close >= bb_upper:
-                score -= 0.5
-                reasons.append("BB_High")
+                if close >= bb_upper:
+                    sell_conditions += 1
+                    sell_reasons.append("BB_High")
 
-            if use_vwap and not pd.isna(df["vwap_z"].iloc[i]):
-                if df["vwap_z"].iloc[i] >= vwap_threshold:
-                    score -= 0.5
-                    reasons.append(f"VWAP_Z={df['vwap_z'].iloc[i]:.1f}")
+                if has_vwap_z and not pd.isna(vwap_z) and vwap_z >= vwap_threshold:
+                    sell_conditions += 1
+                    sell_reasons.append(f"VWAP_Z={vwap_z:.1f}")
 
-            if vol_ok and score < 0:
-                score -= 0.3
-                reasons.append("VolConfirm")
+                if sell_conditions >= 2:
+                    score = -(0.5 * sell_conditions)  # 2条件=-1.0, 3条件=-1.5
+                    if sell_conditions == 3:
+                        score -= 0.3  # 3条件ボーナス（高確度シグナル）
+                    reasons = sell_reasons + ["VolOK"]
 
             signals.append(Signal(score, " ".join(reasons)))
 
