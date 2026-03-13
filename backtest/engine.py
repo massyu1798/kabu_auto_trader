@@ -205,6 +205,11 @@ class BacktestEngine:
         bo_cutoff_str = self.bo_exit.get("time_cutoff", "14:00")
         bo_cutoff_int = int(bo_cutoff_str.replace(":", "")) if bo_cutoff_str else 1400
 
+        # BO entry time range from breakout strategy params
+        bo_params = self.config.get("strategies", {}).get("breakout", {}).get("params", {})
+        bo_entry_start_int = bo_params.get("entry_start_time", 935)
+        bo_entry_end_int = bo_params.get("entry_end_time", 1300)
+
         for date_idx, date in enumerate(all_dates):
             day = date.date() if hasattr(date, "date") else date
 
@@ -465,9 +470,11 @@ class BacktestEngine:
                     # 戦略タグ判定
                     strategy_tag = self._get_strategy_tag(row)
 
-                    # BO戦略: 14:00以降はエントリー停止
-                    if strategy_tag == "breakout" and bar_time_int >= bo_cutoff_int:
-                        continue
+                    # BO戦略: entry_start_time〜min(entry_end_time, time_cutoff) のみエントリー許可
+                    if strategy_tag == "breakout":
+                        bo_effective_end = min(bo_entry_end_int, bo_cutoff_int)
+                        if not (bo_entry_start_int <= bar_time_int <= bo_effective_end):
+                            continue
 
                     atr_col = f"ATRr_{self.atr_period}"
                     atr_val = df[atr_col].loc[date]
