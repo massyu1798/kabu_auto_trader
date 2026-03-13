@@ -36,6 +36,28 @@ from strategy.ensemble import EnsembleEngine
 from strategy.afternoon_reversal import AfternoonReversalEngine
 from risk.risk_manager import RiskManager
 
+_JST = "Asia/Tokyo"
+
+
+def _normalize_ts(ts) -> pd.Timestamp:
+    """タイムスタンプをtz-aware (Asia/Tokyo) に正規化する。
+    AM/PM のイントラデーはすでに Asia/Tokyo tz-aware。
+    ONG の日足データは tz-naive な date/Timestamp を持つため、
+    Asia/Tokyo としてローカライズして統一する。
+
+    None は Trade.entry_date が欠損している異常ケースの防御用。
+    通常の Trade オブジェクトは常に有効な entry_date を持つ。
+    """
+    if ts is None:
+        # Trade.entry_date が None になることは想定外だが、
+        # ソートが壊れないよう最小値を返す（先頭に配置される）。
+        return pd.Timestamp.min.tz_localize(_JST)
+    if not isinstance(ts, pd.Timestamp):
+        ts = pd.Timestamp(ts)
+    if ts.tzinfo is None:
+        return ts.tz_localize(_JST)
+    return ts.tz_convert(_JST)
+
 
 # ユニバース: ONG専用（日経225 ETF, TOPIX ETF + 既存STOCK_POOLから上位20銘柄）
 ONG_ETF_TICKERS = ["1321.T", "1306.T"]
@@ -319,10 +341,10 @@ def main():
     # 全トレードを時系列順に処理してリスクメトリクスを集計
     all_trades_sorted = sorted(
         morning_result.trades + afternoon_result.trades + ong_result.trades,
-        key=lambda t: t.entry_date,
+        key=lambda t: _normalize_ts(t.entry_date),
     )
     for t in all_trades_sorted:
-        risk_manager.update_day(t.entry_date)
+        risk_manager.update_day(_normalize_ts(t.entry_date))
         risk_manager.record_trade_pnl(t.pnl)
 
     # === 合算集計 ===
