@@ -104,7 +104,7 @@ class OvernightGap(StrategyBase):
                 score += 0.4
                 reason_parts.append(f"RSI2={rsi2:.0f}")
 
-            # 条件4: 当日下落率が min_drop 以上の下落
+            # 条件3: 当日下落率が min_drop 以上の下落
             if daily_ret <= min_drop:
                 score += 0.3
                 reason_parts.append(f"Drop={daily_ret:.1f}%")

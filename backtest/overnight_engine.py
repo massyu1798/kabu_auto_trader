@@ -107,8 +107,9 @@ class OvernightGapEngine:
 
     def _night_gap_proxy_ok(self, date) -> bool:
         """
-        条件3の代替近似:
+        夜間先物追い風フィルターの代替近似:
         日経225 ETF(1321.T)の翌日始値 >= 当日終値 × (1 + _NIGHT_GAP_PROXY_MIN)
+        （実際の夜間先物+0.3%条件を翌日始値で近似）
         データがない場合は True（条件を満たすとみなす）
         """
         if self._nikkei_daily is None:
@@ -158,6 +159,7 @@ class OvernightGapEngine:
         current_month = None
         weekly_halted = False
         monthly_halted = False
+        daily_halted = False
         daily_halt_count = 0
         weekly_halt_count = 0
         monthly_halt_count = 0
@@ -201,16 +203,18 @@ class OvernightGapEngine:
             if current_day != day:
                 daily_pnl = 0.0
                 current_day = day
+                daily_halted = False
 
-            # 週間・月間停止チェック
+            # 週間・月間・日次停止チェック
             if not weekly_halted and abs(min(0.0, weekly_pnl)) >= self.ong_capital * self.weekly_max_loss_pct:
                 weekly_halted = True
                 weekly_halt_count += 1
             if not monthly_halted and abs(min(0.0, monthly_pnl)) >= self.ong_capital * self.monthly_max_loss_pct:
                 monthly_halted = True
                 monthly_halt_count += 1
-
-            daily_halted = abs(min(0.0, daily_pnl)) >= self.ong_capital * self.max_daily_loss_pct
+            if not daily_halted and abs(min(0.0, daily_pnl)) >= self.ong_capital * self.max_daily_loss_pct:
+                daily_halted = True
+                daily_halt_count += 1
 
             # === 1. 前日エントリーした全ポジションを当日寄り付きで決済 ===
             positions_to_close = list(open_positions.keys())
@@ -286,10 +290,7 @@ class OvernightGapEngine:
 
             # === 2. 当日の引け時点でエントリー判定 ===
             # 日次/週間/月間損失上限チェック
-            if daily_halted or weekly_halted or monthly_halted:
-                if daily_halted:
-                    daily_halt_count += 1
-            else:
+            if not (daily_halted or weekly_halted or monthly_halted):
                 for ticker, df in daily_signals.items():
                     if ticker in open_positions:
                         continue
@@ -316,7 +317,8 @@ class OvernightGapEngine:
                     if signal_obj.score < self.score_threshold:
                         continue
 
-                    # 条件3: 夜間追い風近似（日経225 ETF翌日始値 >= 当日終値 × 1.003）
+                    # 追加フィルター: 夜間追い風近似（日経225 ETF翌日始値 >= 当日終値 × 1.003）
+                    # バックテスト代替近似: 日経225 ETF(1321.T)の翌日始値 vs 当日終値で+0.3%以上
                     if not self._night_gap_proxy_ok(today_idx):
                         continue
 
