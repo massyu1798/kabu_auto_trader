@@ -98,13 +98,14 @@ strategies:
 
   # === 戦略③ オーバーナイト・ギャップ（日足独立ループで処理） ===
   overnight_gap:
-    enabled: false                   # アンサンブルには含めない（main_backtest.pyで独立ループ）
+    enabled: true                    # バックテスト用独立ループで使用
     weight: 1.0
     params:
-      ibs_oversold: 0.2              # IBS < 0.2 で売られすぎ判定
+      ibs_oversold: 0.2              # IBS < 0.2 で引け値が安値圏
       rsi2_oversold: 10              # RSI(2) < 10 で超売られすぎ
       min_daily_drop_pct: -1.5       # 当日下落率 -1.5%以上が必要
-      signal_score_threshold: 1.1    # 0.8→1.1: 3条件AND必須に近づける（低品質シグナル抑制）
+      signal_score_threshold: 1.1    # 3条件AND必須（IBS+RSI2+Drop合計 >= 1.1）
+      skip_fomc_boj: true            # 日銀/FOMC当日除外
 
 ensemble:
   buy_threshold: 2.5                 # v20: 3.5→2.5 MR単独2条件一致(score=1.0×weight=2.5)で閾値到達可能に

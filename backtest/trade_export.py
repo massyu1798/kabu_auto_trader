@@ -93,14 +93,15 @@ def trades_to_rows(trades: list, session: str) -> list[dict]:
 # 2. Build unified DataFrame
 # ============================================================
 
-def build_trades_df(morning_trades: list, afternoon_trades: list) -> pd.DataFrame:
+def build_trades_df(morning_trades: list, afternoon_trades: list, ong_trades: list = None) -> pd.DataFrame:
     """
-    Merge AM and PM trades into a single DataFrame.
+    Merge AM, PM, and ONG trades into a single DataFrame.
     Returns DataFrame sorted by entry_dt.
     """
     am_rows = trades_to_rows(morning_trades, "AM")
     pm_rows = trades_to_rows(afternoon_trades, "PM")
-    all_rows = am_rows + pm_rows
+    ong_rows = trades_to_rows(ong_trades or [], "ONG")
+    all_rows = am_rows + pm_rows + ong_rows
     if not all_rows:
         return pd.DataFrame()
     df = pd.DataFrame(all_rows)
@@ -116,7 +117,7 @@ def build_trades_df(morning_trades: list, afternoon_trades: list) -> pd.DataFram
 def build_daily_pnl(df: pd.DataFrame, last_days: int | None = None) -> pd.DataFrame:
     """
     Build day x session PnL pivot table.
-    Columns: day, AM_pnl, PM_pnl, TOTAL, AM_cnt, PM_cnt, TOTAL_cnt
+    Columns: day, AM_pnl, PM_pnl, ONG_pnl, TOTAL, AM_cnt, PM_cnt, ONG_cnt, TOTAL_cnt
     Filtered to last N business days (by unique trade days in data).
     """
     if df.empty:
@@ -134,8 +135,8 @@ def build_daily_pnl(df: pd.DataFrame, last_days: int | None = None) -> pd.DataFr
         index="day", columns="session", values="cnt", fill_value=0
     )
 
-    # Ensure AM/PM columns exist
-    for col in ["AM", "PM"]:
+    # Ensure AM/PM/ONG columns exist
+    for col in ["AM", "PM", "ONG"]:
         if col not in pivot_pnl.columns:
             pivot_pnl[col] = 0
         if col not in pivot_cnt.columns:
@@ -145,10 +146,12 @@ def build_daily_pnl(df: pd.DataFrame, last_days: int | None = None) -> pd.DataFr
         "day": pivot_pnl.index,
         "AM_pnl": pivot_pnl["AM"].values,
         "PM_pnl": pivot_pnl["PM"].values,
-        "TOTAL": (pivot_pnl["AM"] + pivot_pnl["PM"]).values,
+        "ONG_pnl": pivot_pnl["ONG"].values,
+        "TOTAL": (pivot_pnl["AM"] + pivot_pnl["PM"] + pivot_pnl["ONG"]).values,
         "AM_cnt": pivot_cnt["AM"].astype(int).values,
         "PM_cnt": pivot_cnt["PM"].astype(int).values,
-        "TOTAL_cnt": (pivot_cnt["AM"] + pivot_cnt["PM"]).astype(int).values,
+        "ONG_cnt": pivot_cnt["ONG"].astype(int).values,
+        "TOTAL_cnt": (pivot_cnt["AM"] + pivot_cnt["PM"] + pivot_cnt["ONG"]).astype(int).values,
     })
     daily.sort_values("day", inplace=True)
     daily.reset_index(drop=True, inplace=True)
@@ -168,7 +171,7 @@ def build_daily_pnl(df: pd.DataFrame, last_days: int | None = None) -> pd.DataFr
 def get_latest_day_summary(df: pd.DataFrame) -> dict:
     """
     Get summary for the latest day in trade data.
-    Returns dict with keys: day, AM_pnl, PM_pnl, TOTAL, AM_cnt, PM_cnt, TOTAL_cnt
+    Returns dict with keys: day, AM_pnl, PM_pnl, ONG_pnl, TOTAL, AM_cnt, PM_cnt, ONG_cnt, TOTAL_cnt
     """
     if df.empty:
         return {}
@@ -178,14 +181,17 @@ def get_latest_day_summary(df: pd.DataFrame) -> dict:
 
     am = latest_df[latest_df["session"] == "AM"]
     pm = latest_df[latest_df["session"] == "PM"]
+    ong = latest_df[latest_df["session"] == "ONG"]
 
     return {
         "day": latest,
         "AM_pnl": am["pnl"].sum() if not am.empty else 0,
         "PM_pnl": pm["pnl"].sum() if not pm.empty else 0,
-        "TOTAL": am["pnl"].sum() + pm["pnl"].sum(),
+        "ONG_pnl": ong["pnl"].sum() if not ong.empty else 0,
+        "TOTAL": am["pnl"].sum() + pm["pnl"].sum() + ong["pnl"].sum(),
         "AM_cnt": len(am),
         "PM_cnt": len(pm),
+        "ONG_cnt": len(ong),
         "TOTAL_cnt": len(latest_df),
     }
 
@@ -223,7 +229,7 @@ def export_daily_json(daily_df: pd.DataFrame, path: str) -> None:
 # ============================================================
 
 def print_daily_table(daily_df: pd.DataFrame) -> None:
-    """Print daily PnL table to console."""
+    """Print daily PnL table to console (AM / PM / ONG columns)."""
     if daily_df.empty:
         print("  (no trade data)")
         return
@@ -233,23 +239,47 @@ def print_daily_table(daily_df: pd.DataFrame) -> None:
     display["day"] = display["day"].astype(str)
     display["AM_pnl"] = display["AM_pnl"].map(lambda x: f"{x:+,.0f}")
     display["PM_pnl"] = display["PM_pnl"].map(lambda x: f"{x:+,.0f}")
+    display["ONG_pnl"] = display["ONG_pnl"].map(lambda x: f"{x:+,.0f}") if "ONG_pnl" in display.columns else "0"
     display["TOTAL"] = display["TOTAL"].map(lambda x: f"{x:+,.0f}")
 
+    has_ong = "ONG_pnl" in daily_df.columns and daily_df["ONG_pnl"].abs().sum() > 0
+
     if HAS_TABULATE:
+        if has_ong:
+            cols = ["day", "AM_pnl", "AM_cnt", "PM_pnl", "PM_cnt", "ONG_pnl", "ONG_cnt", "TOTAL", "TOTAL_cnt"]
+            headers = ["Day", "AM PnL", "AM#", "PM PnL", "PM#", "ONG PnL", "ONG#", "TOTAL", "#"]
+            align = ("left", "right", "right", "right", "right", "right", "right", "right", "right")
+        else:
+            cols = ["day", "AM_pnl", "AM_cnt", "PM_pnl", "PM_cnt", "TOTAL", "TOTAL_cnt"]
+            headers = ["Day", "AM PnL", "AM#", "PM PnL", "PM#", "TOTAL", "#"]
+            align = ("left", "right", "right", "right", "right", "right", "right")
         print(tabulate(
-            display[["day", "AM_pnl", "AM_cnt", "PM_pnl", "PM_cnt", "TOTAL", "TOTAL_cnt"]].values.tolist(),
-            headers=["Day", "AM PnL", "AM#", "PM PnL", "PM#", "TOTAL", "#"],
+            display[cols].values.tolist(),
+            headers=headers,
             tablefmt="simple",
-            colalign=("left", "right", "right", "right", "right", "right", "right"),
+            colalign=align,
         ))
     else:
         # Fallback: simple print
-        header = f"  {'Day':<12} {'AM PnL':>12} {'AM#':>4} {'PM PnL':>12} {'PM#':>4} {'TOTAL':>12} {'#':>4}"
-        print(header)
-        print("  " + "-" * (len(header) - 2))
-        for _, row in display.iterrows():
-            print(f"  {row['day']:<12} {row['AM_pnl']:>12} {row['AM_cnt']:>4} "
-                  f"{row['PM_pnl']:>12} {row['PM_cnt']:>4} {row['TOTAL']:>12} {row['TOTAL_cnt']:>4}")
+        if has_ong:
+            header = (f"  {'Day':<12} {'AM PnL':>12} {'AM#':>4} {'PM PnL':>12} {'PM#':>4}"
+                      f" {'ONG PnL':>12} {'ONG#':>5} {'TOTAL':>12} {'#':>4}")
+            print(header)
+            print("  " + "-" * (len(header) - 2))
+            for _, row in display.iterrows():
+                ong_pnl = row.get("ONG_pnl", "+0")
+                ong_cnt = int(row.get("ONG_cnt", 0))
+                print(f"  {row['day']:<12} {row['AM_pnl']:>12} {row['AM_cnt']:>4} "
+                      f"{row['PM_pnl']:>12} {row['PM_cnt']:>4} "
+                      f"{ong_pnl:>12} {ong_cnt:>5} "
+                      f"{row['TOTAL']:>12} {row['TOTAL_cnt']:>4}")
+        else:
+            header = f"  {'Day':<12} {'AM PnL':>12} {'AM#':>4} {'PM PnL':>12} {'PM#':>4} {'TOTAL':>12} {'#':>4}"
+            print(header)
+            print("  " + "-" * (len(header) - 2))
+            for _, row in display.iterrows():
+                print(f"  {row['day']:<12} {row['AM_pnl']:>12} {row['AM_cnt']:>4} "
+                      f"{row['PM_pnl']:>12} {row['PM_cnt']:>4} {row['TOTAL']:>12} {row['TOTAL_cnt']:>4}")
 
 
 def print_latest_day(summary: dict) -> None:
@@ -259,7 +289,10 @@ def print_latest_day(summary: dict) -> None:
         return
 
     day = summary["day"]
+    ong_pnl = summary.get("ONG_pnl", 0)
+    ong_cnt = summary.get("ONG_cnt", 0)
     print(f"\n■ Latest Day in Data: {day}")
-    print(f"  [AM] PnL: {summary['AM_pnl']:>+14,.0f} 円  ({summary['AM_cnt']} trades)")
-    print(f"  [PM] PnL: {summary['PM_pnl']:>+14,.0f} 円  ({summary['PM_cnt']} trades)")
-    print(f"  TOTAL:    {summary['TOTAL']:>+14,.0f} 円  ({summary['TOTAL_cnt']} trades)")
+    print(f"  [AM]  PnL: {summary['AM_pnl']:>+14,.0f} 円  ({summary['AM_cnt']} trades)")
+    print(f"  [PM]  PnL: {summary['PM_pnl']:>+14,.0f} 円  ({summary['PM_cnt']} trades)")
+    print(f"  [ONG] PnL: {ong_pnl:>+14,.0f} 円  ({ong_cnt} trades)")
+    print(f"  TOTAL:     {summary['TOTAL']:>+14,.0f} 円  ({summary['TOTAL_cnt']} trades)")
