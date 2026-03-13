@@ -1,7 +1,7 @@
 # ============================================
-# Strategy Config v16: 3戦略マルチストラテジー (Leverage 3x)
+# Strategy Config v17: MR集中 + BO一時停止 (Leverage 3x)
 # 保証金約333万 × レバレッジ3倍 = 建玉上限 1000万円
-# MR 50%(500万) / BO 30%(300万) / ONG 20%(200万)
+# MR 80%(800万) / BO 0%(停止) / ONG 20%(200万)
 # ============================================
 
 global:
@@ -20,9 +20,9 @@ global:
 
 # === 戦略別資金配分 ===
 capital_allocation:
-  mean_reversion: 0.50               # MR: 500万円
-  breakout: 0.30                     # BO: 300万円
-  overnight_gap: 0.20                # ONG: 200万円（独立ループで管理）
+  mean_reversion: 0.80               # v17: 0.50→0.80 MR集中（BO停止分を振替）
+  breakout: 0.00                     # v17: 0.30→0.00 BO停止
+  overnight_gap: 0.20                # 維持
 
 screening:
   enabled: true
@@ -40,7 +40,7 @@ strategies:
   # === 戦略① ミーンリバージョン（主力: weight最大） ===
   mean_reversion:
     enabled: true
-    weight: 2.5                      # 主力戦略のため高ウェイト（VWAP乖離+RSI+BBの逆張り）
+    weight: 3.5                      # v17: 2.5→3.5 MR集中戦略
     params:
       rsi_period: 14
       rsi_oversold: 25               # 30→25: 厳格化でダマシ削減
@@ -54,13 +54,13 @@ strategies:
       take_profit_pct: 0.008         # 0.005→0.008: +0.8%利確（損切り幅とのバランス改善）
       stop_loss_pct: 0.005           # 0.003→0.005: -0.5%損切り（ノイズ耐性向上）
       vwap_reversion: true           # VWAP回帰（乖離率0付近）で利確
-      vwap_reversion_threshold: 0.3  # vwap_z が ±0.3 以内に回帰したら利確
+      vwap_reversion_threshold: 0.5  # v17: 0.3→0.5 VWAP回帰利確の発動率UP
       time_cutoff: "14:30"           # 14:30時間切り
 
   # === 戦略② ブレイクアウト・モメンタム ===
   breakout:
-    enabled: true
-    weight: 1.5                      # 順張り補完
+    enabled: false                   # v17: PF 0.41の損失源を一時停止
+    weight: 1.5                      # v17停止中（再有効化時の参照値）
     params:
       channel_period: 15             # 短期のブレイクアウト捕捉
       orb_minutes: 30                # 20→30: 寄付30分でORBレンジ確定（仕様通り）
@@ -103,8 +103,8 @@ strategies:
       signal_score_threshold: 1.1    # 0.8→1.1: 3条件AND必須に近づける（低品質シグナル抑制）
 
 ensemble:
-  buy_threshold: 2.0                 # 1.2→2.0: エントリー条件厳格化（BO誤発火抑制）
-  sell_threshold: -2.0               # -1.2→-2.0: SHORT抑制
+  buy_threshold: 2.5                 # v17: 2.0→2.5 エントリー条件厳格化
+  sell_threshold: -2.5               # v17: -2.0→-2.5
 
 exit:
   atr_period: 14
@@ -115,7 +115,7 @@ exit:
 
 cooldown:
   enabled: true
-  bars_after_loss: 6                 # 30分クールダウン（5分足×6本）
+  bars_after_loss: 12                # v17: 6→12 連敗抑制（1時間クールダウン）
   bars_after_win: 2
 
 trend_filter:

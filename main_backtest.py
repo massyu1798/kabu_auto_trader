@@ -1,7 +1,7 @@
 """
-バックテスト v16: 3戦略マルチストラテジー
-- MR (ミーンリバージョン): 9:30〜14:30, VWAP回帰エグジット
-- BO (ブレイクアウト): 分割決済 + ORB復帰損切り
+バックテスト v17: MR集中 + BO一時停止
+- MR (ミーンリバージョン): 9:30〜14:30, VWAP回帰エグジット, 資金80%集中
+- BO (ブレイクアウト): v17で一時停止（PF 0.41のため）
 - ONG (オーバーナイト・ギャップ): 日足独立ループ, 引け買い→翌朝寄り決済
 """
 
@@ -194,7 +194,7 @@ def run_ong_backtest(tickers: list, config: dict) -> list:
 
 def main():
     print("=" * 60)
-    print("  🌅 日本株自動売買 v16: 3戦略マルチストラテジー")
+    print("  🌅 日本株自動売買 v17: MR集中 + BO一時停止")
     print("=" * 60)
 
     with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
@@ -268,7 +268,7 @@ def main():
         print(f"  📊 トータル勝率: {(len(win_trades)/len(all_trades)*100):.1f}%")
 
     plot_equity_curve(result, engine.initial_capital)
-    print("\n✅ v16 テスト完了。")
+    print("\n✅ v17 テスト完了。")
 
 if __name__ == "__main__":
     main()
