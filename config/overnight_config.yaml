@@ -1,0 +1,66 @@
+# ============================================
+# オーバーナイト・ギャップ戦略設定 v1.1
+# 引け買い → 翌日寄り付き売り（ONG: Overnight Gap）
+# ============================================
+
+global:
+  # ONG専用資金（initial_capitalの20%: 2,000,000円）
+  overnight_capital: 2000000
+  commission_rate: 0.0
+  slippage_rate: 0.001
+  # ATRベースポジションサイジング: 1トレード最大損失 = 資金の1%
+  risk_per_trade: 0.01
+  # 1銘柄最大建玉: ONG資金の15%
+  max_position_pct: 0.15
+  # 同時保有上限（ONG専用）
+  max_positions: 3
+
+# === エントリー条件（全条件AND） ===
+entry:
+  # 条件1: IBS (Internal Bar Strength) = (終値 - 安値) / (高値 - 安値)
+  ibs_oversold: 0.3              # 緩和: 0.2 → 0.3（シグナル頻度向上）
+  # 条件2: RSI(2) 超短期買われすぎ/売られすぎ
+  rsi2_oversold: 15              # 緩和: 10 → 15（シグナル頻度向上）
+  # 条件3: 当日下落率（%表記: -1.0 = -1.0%以上の下落が必要）
+  min_daily_drop_pct: -1.0       # 緩和: -1.5% → -1.0%
+  # シグナルスコア閾値（IBS+RSI2+Drop合計スコア）
+  # IBS<threshold: +0.5, RSI2<threshold: +0.4, Drop<threshold: +0.3 の合計
+  # 緩和版: 0.9 = IBS+RSI2条件だけで発動可能（Dropなしでも可）
+  signal_score_threshold: 0.9
+
+# === 夜間追い風フィルター（条件4: 先物代替近似） ===
+night_gap_proxy:
+  # 日経225 ETF (1321.T) の翌日始値 >= 当日終値 × (1 + min_gap_pct)
+  # → 夜間の追い風（米国市場の好調）を近似
+  enabled: true
+  min_gap_pct: 0.003             # +0.3%以上（元の条件と同じ）
+
+# === エグジット条件 ===
+exit:
+  # ギャップダウン時の損切りキャップ
+  gap_down_stop_pct: -0.01       # -1.0%損切り
+  # 翌日寄り付きで成行売り（基本）
+  # ギャップアップ → そのまま利確
+  # ギャップダウン -1.0%以上 → -1.0%でキャップ
+
+# === リスク管理 ===
+risk:
+  max_daily_loss_pct: 0.025      # ONG資金の2.5% = 50,000円で当日停止
+  weekly_max_loss_pct: 0.05      # ONG資金の5.0% = 100,000円で週間停止
+  monthly_max_loss_pct: 0.10     # ONG資金の10% = 200,000円で月間停止
+
+# === 追加フィルター ===
+filters:
+  # 金曜日引け → 月曜日寄りは不参加（週末リスク回避）
+  skip_friday: true
+  # 日銀金融政策決定会合・FOMC当日は除外
+  skip_fomc_boj: true
+
+# === ユニバース ===
+universe:
+  # ETFは必ず含む
+  etf_tickers:
+    - "1321.T"    # 日経225 ETF
+    - "1306.T"    # TOPIX ETF
+  # STOCK_POOLから上位N銘柄
+  stock_top_n: 20
