@@ -1,11 +1,9 @@
-"""戦略② ORBブレイクアウト・モメンタム v19
+"""戦略② ORBブレイクアウト・モメンタム v20
 - Opening Range Breakout (寄り30分レンジ)
 - チャネルブレイクアウト（従来版）との併用
-- MACD確認フィルター付き
-- ATRフィルター: 低ボラ相場のダマシを排除
-- 出来高急増確認（AND必須条件）: ブレイクアウト時に出来高が平均の1.5倍以上
-- ORBレンジ幅フィルター: 狭すぎるレンジのダマシを抑制
-- ブレイクアウト確認足: 方向に2本連続で引けた場合のみ追加スコア
+- 独立判定型: ATR必須 + 出来高必須 + ブレイクアウト成立で最低スコア1.0を保証
+- MACD確認ボーナス: +0.5
+- チャネル・ORB両方成立ボーナス: +0.5
 - エントリー時間帯制限: 9:35〜13:00
 """
 
@@ -66,9 +64,6 @@ class Breakout(StrategyBase):
 
         use_orb = p.get("use_orb", False)
         macd_confirm = p.get("macd_confirm", False)
-        volume_confirm_ratio = p.get("volume_confirm_ratio", 1.5)
-        min_atr_pct = p.get("min_atr_pct", 0.005)
-        orb_min_range_ratio = p.get("orb_min_range_ratio", 0.3)
         entry_start_time = p.get("entry_start_time", 935)
         entry_end_time = p.get("entry_end_time", 1300)
 
@@ -99,10 +94,9 @@ class Breakout(StrategyBase):
 
         # 出来高移動平均（ブレイクアウト時の急増確認用）
         df["vol_ma20"] = df["volume"].rolling(20).mean()
-        df["vol_ma5"] = df["volume"].rolling(5).mean()
 
-        # 前日ATR（ORBレンジ幅フィルター用）
-        df["prev_day_atr"] = self._calc_prev_day_atr(df, atr_period=14)
+        min_atr_pct = p.get("min_atr_pct", 0.005)
+        vol_ratio = p.get("volume_confirm_ratio", 1.5)
 
         signals = []
         for i in range(len(df)):
@@ -111,100 +105,78 @@ class Breakout(StrategyBase):
 
             close = df["close"].iloc[i]
 
+            # --- ATRフィルター（必須条件）---
+            atr_val = df["atr14"].iloc[i]
+            if pd.isna(atr_val) or close <= 0 or atr_val / close < min_atr_pct:
+                signals.append(Signal(0, "LowATR"))
+                continue
+
+            # --- 出来高フィルター（必須条件）---
+            vol_ma = df["vol_ma20"].iloc[i]
+            if pd.isna(vol_ma) or vol_ma <= 0 or df["volume"].iloc[i] < vol_ma * vol_ratio:
+                signals.append(Signal(0, "NoVol"))
+                continue
+
             # --- エントリー時間帯フィルター ---
             bar_idx = df.index[i]
             if hasattr(bar_idx, "hour"):
-                bar_time_int = bar_idx.hour * 100 + bar_idx.minute
-                if not (entry_start_time <= bar_time_int <= entry_end_time):
-                    signals.append(Signal(0, "TimeFilter"))
+                t = bar_idx.hour * 100 + bar_idx.minute
+                if t < entry_start_time or t > entry_end_time:
+                    signals.append(Signal(0, "TimeOut"))
                     continue
 
-            # --- ATRフィルター（低ボラ相場のダマシを排除）---
-            atr_val = df["atr14"].iloc[i]
-            if not pd.isna(atr_val) and close > 0:
-                atr_pct = atr_val / close
-                if atr_pct < min_atr_pct:
-                    signals.append(Signal(0, "LowATR"))
-                    continue
-
-            # --- 出来高急増確認（AND必須条件）---
-            vol_ma20 = df["vol_ma20"].iloc[i]
-            vol_ok = (
-                not pd.isna(vol_ma20)
-                and vol_ma20 > 0
-                and df["volume"].iloc[i] > vol_ma20 * volume_confirm_ratio
+            # --- ブレイクアウト判定 ---
+            breakout_up = not pd.isna(df["high_max"].iloc[i]) and close > df["high_max"].iloc[i]
+            breakout_down = not pd.isna(df["low_min"].iloc[i]) and close < df["low_min"].iloc[i]
+            orb_up = (
+                use_orb
+                and "orb_high" in df.columns
+                and not pd.isna(df["orb_high"].iloc[i])
+                and close > df["orb_high"].iloc[i]
             )
-            if not vol_ok:
-                signals.append(Signal(0, "NoVolSurge"))
-                continue
+            orb_down = (
+                use_orb
+                and "orb_low" in df.columns
+                and not pd.isna(df["orb_low"].iloc[i])
+                and close < df["orb_low"].iloc[i]
+            )
 
-            # --- チャネルブレイクアウト（上方向） ---
-            if not pd.isna(df["high_max"].iloc[i]) and close > df["high_max"].iloc[i]:
-                score += 0.6
-                reasons.append("ChBreakout")
-
-            # --- チャネルブレイクダウン（下方向） ---
-            if not pd.isna(df["low_min"].iloc[i]) and close < df["low_min"].iloc[i]:
-                score -= 0.6
-                reasons.append("ChBreakdown")
-
-            # --- ORBブレイクアウト + レンジ幅フィルター ---
-            if use_orb and "orb_high" in df.columns:
-                orb_h = df["orb_high"].iloc[i]
-                orb_l = df["orb_low"].iloc[i]
-                prev_atr = df["prev_day_atr"].iloc[i]
-
-                # ORBレンジ幅フィルター: レンジが前日ATRの orb_min_range_ratio 未満はスコア抑制
-                orb_range_ok = True
-                if not pd.isna(orb_h) and not pd.isna(orb_l) and not pd.isna(prev_atr) and prev_atr > 0:
-                    orb_range = orb_h - orb_l
-                    if orb_range < prev_atr * orb_min_range_ratio:
-                        orb_range_ok = False
-
-                if orb_range_ok:
-                    if not pd.isna(orb_h) and close > orb_h:
+            if breakout_up or orb_up:
+                score = 1.0
+                if breakout_up:
+                    reasons.append("ChBreakout")
+                if orb_up:
+                    reasons.append("ORB_Up")
+                # MACD確認ボーナス
+                if macd_confirm and "macd_line" in df.columns:
+                    ml = df["macd_line"].iloc[i]
+                    ms = df["macd_signal"].iloc[i]
+                    if not pd.isna(ml) and not pd.isna(ms) and ml > ms:
                         score += 0.5
-                        reasons.append("ORB_Up")
-                    elif not pd.isna(orb_l) and close < orb_l:
-                        score -= 0.5
-                        reasons.append("ORB_Down")
-
-            # --- MACD確認 ---
-            if macd_confirm and "macd_line" in df.columns:
-                ml = df["macd_line"].iloc[i]
-                ms = df["macd_signal"].iloc[i]
-                if not pd.isna(ml) and not pd.isna(ms):
-                    if score > 0 and ml > ms:
-                        score += 0.3
                         reasons.append("MACD_Bull")
-                    elif score < 0 and ml < ms:
-                        score -= 0.3
+                # 両方成立ボーナス
+                if breakout_up and orb_up:
+                    score += 0.5
+                    reasons.append("DualBreak")
+                reasons.extend(["ATR_OK", "VolOK"])
+            elif breakout_down or orb_down:
+                score = -1.0
+                if breakout_down:
+                    reasons.append("ChBreakdown")
+                if orb_down:
+                    reasons.append("ORB_Down")
+                # MACD確認ボーナス
+                if macd_confirm and "macd_line" in df.columns:
+                    ml = df["macd_line"].iloc[i]
+                    ms = df["macd_signal"].iloc[i]
+                    if not pd.isna(ml) and not pd.isna(ms) and ml < ms:
+                        score -= 0.5
                         reasons.append("MACD_Bear")
-
-            # --- ブレイクアウト確認足（2本連続で同方向に引けた場合のみ追加スコア）---
-            if i >= 1 and score != 0:
-                prev_close = df["close"].iloc[i - 1]
-                prev_open = df["open"].iloc[i - 1]
-                curr_open = df["open"].iloc[i]
-                if score > 0:
-                    # 上方向: 前足・現足ともに陽線かつ現足終値が前足終値を上回る
-                    if prev_close > prev_open and close > curr_open and close > prev_close:
-                        score += 0.2
-                        reasons.append("ConfirmBar")
-                elif score < 0:
-                    # 下方向: 前足・現足ともに陰線かつ現足終値が前足終値を下回る
-                    if prev_close < prev_open and close < curr_open and close < prev_close:
-                        score -= 0.2
-                        reasons.append("ConfirmBar")
-
-            # --- 出来高増加トレンド（補助スコア）---
-            if not pd.isna(df["vol_ma5"].iloc[i]) and df["vol_ma5"].iloc[i] > 0:
-                if df["volume"].iloc[i] > df["vol_ma5"].iloc[i] * 1.3:
-                    if score > 0:
-                        score += 0.1
-                    elif score < 0:
-                        score -= 0.1
-                    reasons.append("VolTrend")
+                # 両方成立ボーナス
+                if breakout_down and orb_down:
+                    score -= 0.5
+                    reasons.append("DualBreak")
+                reasons.extend(["ATR_OK", "VolOK"])
 
             signals.append(Signal(score, " ".join(reasons)))
 

@@ -1,8 +1,9 @@
 """
-バックテスト v19: BO再有効化 + MR損切り幅拡大 + フィルター強化
-- MR (ミーンリバージョン): 損切り幅拡大(0.4%→0.7%), 利確縮小(1.2%→0.8%), VWAP閾値緩和
-- BO (ブレイクアウト): ATRフィルター+出来高AND条件+ORBレンジ幅フィルター+確認足で再有効化
-- ONG (オーバーナイト・ギャップ): 日足独立ループ, 引け買い→翌朝寄り決済（変更なし）
+バックテスト v20: 独立判定型アーキテクチャ + 閾値適正化
+- アンサンブル閾値を2.5に引き下げ（MR2条件一致で閾値到達可能に）
+- BO: AND条件型フィルター（ATR+出来高+ブレイクアウト）で独立判定、最低スコア1.0保証
+- MR: RSI/VWAP閾値緩和で取引機会確保、ノイズ耐性向上
+- ONG: 変更なし（独立日足ループ）
 """
 
 import pandas as pd
@@ -194,7 +195,7 @@ def run_ong_backtest(tickers: list, config: dict) -> list:
 
 def main():
     print("=" * 60)
-    print("  🚀 日本株自動売買 v19: BO再有効化 + MR改善 + フィルター強化")
+    print("  🚀 日本株自動売買 v20: 独立判定型 + 閾値適正化")
     print("=" * 60)
 
     with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
@@ -268,7 +269,7 @@ def main():
         print(f"  📊 トータル勝率: {(len(win_trades)/len(all_trades)*100):.1f}%")
 
     plot_equity_curve(result, engine.initial_capital)
-    print("\n✅ v19 テスト完了。")
+    print("\n✅ v20 テスト完了。")
 
 if __name__ == "__main__":
     main()
