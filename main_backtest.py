@@ -1,8 +1,8 @@
 """
-バックテスト v18: MR AND条件化 + 出来高必須 + 閾値厳格化
-- MR (ミーンリバージョン): 3条件のうち2条件以上AND必須, 出来高必須, 閾値引き上げ
-- BO (ブレイクアウト): v17より停止継続（PF 0.41のため）
-- ONG (オーバーナイト・ギャップ): 日足独立ループ, 引け買い→翌朝寄り決済
+バックテスト v19: BO再有効化 + MR損切り幅拡大 + フィルター強化
+- MR (ミーンリバージョン): 損切り幅拡大(0.4%→0.7%), 利確縮小(1.2%→0.8%), VWAP閾値緩和
+- BO (ブレイクアウト): ATRフィルター+出来高AND条件+ORBレンジ幅フィルター+確認足で再有効化
+- ONG (オーバーナイト・ギャップ): 日足独立ループ, 引け買い→翌朝寄り決済（変更なし）
 """
 
 import pandas as pd
@@ -194,7 +194,7 @@ def run_ong_backtest(tickers: list, config: dict) -> list:
 
 def main():
     print("=" * 60)
-    print("  🌅 日本株自動売買 v18: MR AND条件化 + 出来高必須 + 閾値厳格化")
+    print("  🚀 日本株自動売買 v19: BO再有効化 + MR改善 + フィルター強化")
     print("=" * 60)
 
     with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
@@ -268,7 +268,7 @@ def main():
         print(f"  📊 トータル勝率: {(len(win_trades)/len(all_trades)*100):.1f}%")
 
     plot_equity_curve(result, engine.initial_capital)
-    print("\n✅ v18 テスト完了。")
+    print("\n✅ v19 テスト完了。")
 
 if __name__ == "__main__":
     main()
