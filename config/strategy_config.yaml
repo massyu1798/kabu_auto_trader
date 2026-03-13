@@ -1,5 +1,5 @@
 # ============================================
-# Strategy Config v15: 3戦略マルチストラテジー (Leverage 3x)
+# Strategy Config v16: 3戦略マルチストラテジー (Leverage 3x)
 # 保証金約333万 × レバレッジ3倍 = 建玉上限 1000万円
 # MR 50%(500万) / BO 30%(300万) / ONG 20%(200万)
 # ============================================
@@ -51,8 +51,8 @@ strategies:
       use_vwap: true                 # VWAP乖離フィルター有効化
       volume_confirm_ratio: 1.5      # 1.3→1.5: 出来高確認を厳格化
     exit:                            # MR戦略固有エグジット
-      take_profit_pct: 0.005         # +0.5%利確
-      stop_loss_pct: 0.003           # -0.3%損切り
+      take_profit_pct: 0.008         # 0.005→0.008: +0.8%利確（損切り幅とのバランス改善）
+      stop_loss_pct: 0.005           # 0.003→0.005: -0.5%損切り（ノイズ耐性向上）
       vwap_reversion: true           # VWAP回帰（乖離率0付近）で利確
       vwap_reversion_threshold: 0.3  # vwap_z が ±0.3 以内に回帰したら利確
       time_cutoff: "14:30"           # 14:30時間切り
@@ -68,7 +68,7 @@ strategies:
       macd_confirm: true             # MACD確認フィルター
     exit:                            # BO戦略固有エグジット
       partial_targets: [0.01, 0.02, 0.03]  # 分割決済: 1/3ずつ +1%, +2%, +3%
-      stop_loss_pct: 0.007           # -0.7%損切り
+      stop_loss_pct: 0.005           # 0.007→0.005: -0.5%損切り（1回の損失を縮小）
       orb_reentry_stop: true         # ORBレンジ内に戻った場合の損切り
       time_cutoff: "14:00"           # 14:00エントリー停止
 
@@ -82,7 +82,7 @@ strategies:
       macd_fast: 12
       macd_slow: 26
       macd_signal: 9
-      sell_enabled: true             # デッドクロスでSELLシグナルも
+      sell_enabled: false            # true→false: デッドクロスSELLシグナルを停止（SHORT勝率25%のため）
 
   # === 出来高プロファイル（補助フィルター） ===
   volume_profile:
@@ -100,11 +100,11 @@ strategies:
       ibs_oversold: 0.2              # IBS < 0.2 で売られすぎ判定
       rsi2_oversold: 10              # RSI(2) < 10 で超売られすぎ
       min_daily_drop_pct: -1.5       # 当日下落率 -1.5%以上が必要
-      signal_score_threshold: 0.8    # シグナルスコア最低閾値
+      signal_score_threshold: 1.1    # 0.8→1.1: 3条件AND必須に近づける（低品質シグナル抑制）
 
 ensemble:
-  buy_threshold: 1.2                 # エントリー条件を少し緩和
-  sell_threshold: -1.2               # 空売りも同基準
+  buy_threshold: 2.0                 # 1.2→2.0: エントリー条件厳格化（BO誤発火抑制）
+  sell_threshold: -2.0               # -1.2→-2.0: SHORT抑制
 
 exit:
   atr_period: 14
