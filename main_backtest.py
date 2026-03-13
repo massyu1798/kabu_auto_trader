@@ -1,17 +1,21 @@
 """
-バックテスト v12: モーニング・モメンタム 安定版
-- エントリーを 9:05〜11:00 に限定
-- VWAPフィルター復活
+バックテスト v15: 3戦略マルチストラテジー
+- MR (ミーンリバージョン): 9:30〜14:30, VWAP回帰エグジット
+- BO (ブレイクアウト): 分割決済 + ORB復帰損切り
+- ONG (オーバーナイト・ギャップ): 日足独立ループ, 引け買い→翌朝寄り決済
 """
 
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import yaml
 import pandas_ta as ta
-from backtest.engine import BacktestEngine
+from backtest.engine import BacktestEngine, BacktestResult, Trade, Side
 from backtest.reporter import generate_report, plot_equity_curve
 from backtest.screener import screen_stocks
 from strategy.ensemble import EnsembleEngine
+from strategy.overnight_gap import OvernightGap
+from strategy.breakout import Breakout
 
 def load_intraday(ticker):
     try:
@@ -29,6 +33,10 @@ def load_intraday(ticker):
             data.index = data.index.tz_localize("UTC").tz_convert("Asia/Tokyo")
         # VWAPを計算して追加
         data["vwap"] = ta.vwap(data["high"], data["low"], data["close"], data["volume"])
+        # VWAP乖離z-scoreを計算 (MRエグジットのVWAP回帰チェック用)
+        vwap_dev = data["close"] - data["vwap"]
+        vwap_dev_std = vwap_dev.rolling(window=20, min_periods=5).std()
+        data["vwap_z"] = vwap_dev / vwap_dev_std.replace(0, np.nan)
         # 取引時間フィルター
         data = data[(data.index.hour >= 9) & ((data.index.hour < 15) | ((data.index.hour == 15) & (data.index.minute <= 25)))]
         return data
@@ -75,17 +83,17 @@ def apply_v11_filter(signals_df, daily_bias):
             result.loc[idx, "final_signal"] = "HOLD"
     return result
 
-def apply_v12_filters(signals_df):
+def apply_v15_filters(signals_df):
     """
-    v12フィルター:
-    1. 時間帯フィルター: 9:05〜14:00 以外はHOLD（後場前半まで許可）
+    v15フィルター:
+    1. 時間帯フィルター: 9:30〜14:30 以外はHOLD（寄り30分の乱高下を回避）
     2. VWAPフィルター: VWAP以下での買いはHOLD
     """
     result = signals_df.copy()
     for idx in result.index:
-        # 1. 時間帯フィルター
+        # 1. 時間帯フィルター（9:30〜14:30）
         t = idx.hour * 100 + idx.minute
-        if not (905 <= t <= 1400):
+        if not (930 <= t <= 1430):
             result.loc[idx, "final_signal"] = "HOLD"
             continue
 
@@ -97,9 +105,84 @@ def apply_v12_filters(signals_df):
 
     return result
 
+def run_ong_backtest(tickers: list, config: dict) -> list:
+    """
+    オーバーナイト・ギャップ独立バックテスト（日足）
+    - IBS < 0.2 + RSI(2) < 10 + 当日下落率 -1.5%以上 → 当日引け買い
+    - 翌営業日の寄り付きで成行売り
+    - 金曜引け→月曜寄りは不参加
+    """
+    ong_cfg = config.get("strategies", {}).get("overnight_gap", {})
+    ong_params = ong_cfg.get("params", {})
+    alloc_pct = config.get("capital_allocation", {}).get("overnight_gap", 0.20)
+    initial_capital = config["global"]["initial_capital"]
+    ong_capital = alloc_pct * initial_capital        # ONG資金配分
+    score_threshold = ong_params.get("signal_score_threshold", 0.8)
+    slippage = config["global"].get("slippage_rate", 0.001)
+    commission = config["global"].get("commission_rate", 0.0)
+
+    strategy = OvernightGap(ong_params)
+    ong_trades = []
+
+    for ticker in tickers:
+        df_daily = load_daily(ticker)
+        if df_daily is None or len(df_daily) < 10:
+            continue
+
+        signals = strategy.generate_signals(df_daily)
+
+        for i in range(len(df_daily) - 1):
+            sig = signals.iloc[i]
+            # 買いシグナルのみ（score > threshold）
+            if sig.score < score_threshold:
+                continue
+
+            date = df_daily.index[i]
+            # 金曜日は除外（週末リスク回避）
+            if hasattr(date, "weekday") and date.weekday() == 4:
+                continue
+
+            entry_price = float(df_daily["close"].iloc[i])
+            exit_price = float(df_daily["open"].iloc[i + 1])
+            exit_date = df_daily.index[i + 1]
+
+            if entry_price <= 0 or exit_price <= 0:
+                continue
+
+            # ポジションサイズ: ONG資金の最大30%/銘柄
+            max_per_trade = ong_capital * 0.30
+            size = (int(max_per_trade / entry_price) // 100) * 100
+            if size < 100:
+                continue
+
+            ep = entry_price * (1 + slippage)
+            xp = exit_price * (1 - slippage)
+            pnl = (xp - ep) * size
+            pnl -= abs(xp * size * commission)
+            pnl_pct = (xp - ep) / ep * 100
+
+            trade = Trade(
+                ticker=ticker,
+                side=Side.LONG,
+                entry_price=ep,
+                exit_price=xp,
+                entry_date=date,
+                exit_date=exit_date,
+                size=size,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                entry_reason=f"ONG:{sig.reason}",
+                exit_reason="翌日寄り決済",
+                strategy_tag="overnight_gap",
+            )
+            ong_trades.append(trade)
+
+    return ong_trades
+
+
 def main():
     print("=" * 60)
-    print("  🌅 日本株自動売買 v12: モーニング・モメンタム")
+    print("  🌅 日本株自動売買 v15: 3戦略マルチストラテジー")
     print("=" * 60)
 
     with open("config/strategy_config.yaml", "r", encoding="utf-8") as f:
@@ -111,36 +194,66 @@ def main():
 
     print(f"\n■ 解析中...")
     ensemble = EnsembleEngine("config/strategy_config.yaml")
+    # BO用にORBレンジを計算してsignals_dfに追加するためのインスタンス
+    bo_params = config.get("strategies", {}).get("breakout", {}).get("params", {})
+    bo_helper = Breakout(bo_params)
+    orb_minutes = bo_params.get("orb_minutes", 30)
     signals_dict = {}
-    
+
     for ticker in tickers:
         df_5m = load_intraday(ticker)
         df_daily = load_daily(ticker)
         if df_5m is None or df_daily is None or len(df_5m) < 20: continue
-        
+
         bias = calc_daily_bias(df_daily, config)
         signals_df = ensemble.generate_ensemble_signals(df_5m)
         signals_df = apply_v11_filter(signals_df, bias)
-        signals_df = apply_v12_filters(signals_df)       # ★ v12フィルター復活
-        
+        signals_df = apply_v15_filters(signals_df)       # ★ v15フィルター（9:30〜14:30）
+
+        # BO用: ORBレンジをsignals_dfに追加（エンジンのORB復帰損切りに使用）
+        try:
+            orb_df = bo_helper._calc_orb(df_5m, minutes=orb_minutes)
+            signals_df["orb_high"] = orb_df["orb_high"]
+            signals_df["orb_low"] = orb_df["orb_low"]
+            # MR用: vwap_zをsignals_dfに引き継ぎ
+            if "vwap_z" in df_5m.columns:
+                signals_df["vwap_z"] = df_5m["vwap_z"]
+        except Exception:
+            pass
+
         signals_dict[ticker] = signals_df
         print(".", end="", flush=True)
 
-    print("\n\n■ バックテスト実行...")
+    print(f"\n\n■ イントラデイ バックテスト実行 (MR+BO)...")
     engine = BacktestEngine("config/strategy_config.yaml")
     result = engine.run(signals_dict)
 
-    print(generate_report(result, engine.initial_capital))
+    print(f"\n■ オーバーナイト・ギャップ バックテスト実行 (ONG)...")
+    ong_trades = run_ong_backtest(tickers, config)
+    print(f"  ONG取引数: {len(ong_trades)}件")
 
-    if result.trades:
-        days = len(set(t.entry_date.date() for t in result.trades))
-        freq = len(result.trades) / days if days > 0 else 0
+    # 結果統合
+    all_trades = result.trades + ong_trades
+    combined_result = BacktestResult(
+        trades=all_trades,
+        equity_curve=result.equity_curve,
+        dates=result.dates,
+    )
+
+    print(generate_report(combined_result, engine.initial_capital))
+
+    if all_trades:
+        days = len(set(
+            t.entry_date.date() if hasattr(t.entry_date, "date") else t.entry_date
+            for t in all_trades
+        ))
+        freq = len(all_trades) / days if days > 0 else 0
         print(f"  🔥 1日平均取引数: {freq:.2f} 回")
-        win_trades = [t for t in result.trades if t.pnl > 0]
-        print(f"  📊 トータル勝率: {(len(win_trades)/len(result.trades)*100):.1f}%")
+        win_trades = [t for t in all_trades if t.pnl > 0]
+        print(f"  📊 トータル勝率: {(len(win_trades)/len(all_trades)*100):.1f}%")
 
     plot_equity_curve(result, engine.initial_capital)
-    print("\n✅ v12 テスト完了。")
+    print("\n✅ v15 テスト完了。")
 
 if __name__ == "__main__":
     main()

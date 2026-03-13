@@ -85,7 +85,7 @@ def generate_report(result: BacktestResult, initial_capital: float) -> str:
 
     report = f"""
 ============================================================
-           バックテストレポート (v12 安定版)
+           バックテストレポート (v15 マルチストラテジー)
 ============================================================
 
 ■ 概要
@@ -107,8 +107,34 @@ def generate_report(result: BacktestResult, initial_capital: float) -> str:
 ■ LONG / SHORT 別勝率
   LONG  ({len(long_trades):3d}回): {long_win_rate:.1f}%
   SHORT ({len(short_trades):3d}回): {short_win_rate:.1f}%
+"""
 
-■ 日別損益サマリー
+    # 戦略別損益サマリー
+    strategy_tags = sorted(set(t.strategy_tag for t in trades if t.strategy_tag))
+    if strategy_tags:
+        tag_labels = {
+            "mean_reversion": "MR  ミーンリバージョン",
+            "breakout": "BO  ブレイクアウト",
+            "overnight_gap": "ONG オーバーナイト・ギャップ",
+        }
+        report += "■ 戦略別損益サマリー\n"
+        for tag in strategy_tags:
+            tag_trades = [t for t in trades if t.strategy_tag == tag]
+            tag_wins = [t for t in tag_trades if t.pnl > 0]
+            tag_wr = len(tag_wins) / len(tag_trades) * 100 if tag_trades else 0
+            tag_pnl = sum(t.pnl for t in tag_trades)
+            tag_win_amt = sum(t.pnl for t in tag_wins)
+            tag_loss_amt = abs(sum(t.pnl for t in tag_trades if t.pnl <= 0))
+            tag_pf = tag_win_amt / tag_loss_amt if tag_loss_amt > 0 else float("inf")
+            label = tag_labels.get(tag, tag)
+            report += (
+                f"  [{label}]\n"
+                f"    取引数: {len(tag_trades):3d}  勝率: {tag_wr:.1f}%"
+                f"  PF: {tag_pf:.2f}  損益: {tag_pnl:>+12,.0f} 円\n"
+            )
+        report += "\n"
+
+    report += f"""■ 日別損益サマリー
   取引日数:             {len(daily_pnl)} 日
   勝ち日:               {positive_days} 日
   負け日:               {negative_days} 日
