@@ -50,8 +50,9 @@ def _normalize_ts(ts) -> pd.Timestamp:
     """
     if ts is None:
         # Trade.entry_date が None になることは想定外だが、
-        # ソートが壊れないよう最小値を返す（先頭に配置される）。
-        return pd.Timestamp.min.tz_localize(_JST)
+        # ソートが壊れないよう古い日付を返す（先頭に配置される）。
+        # pd.Timestamp.min は pandas 3.x でtz_localizeがオーバーフローするため使用不可。
+        return pd.Timestamp("1990-01-01").tz_localize(_JST)
     if not isinstance(ts, pd.Timestamp):
         ts = pd.Timestamp(ts)
     if ts.tzinfo is None:
@@ -331,7 +332,10 @@ def main():
 
     # === ONG バックテスト ===
     print("  [オーバーナイト・ギャップ] 実行中...")
-    ong_engine = OvernightGapEngine("config/strategy_config.yaml")
+    ong_engine = OvernightGapEngine(
+        config_path="config/strategy_config.yaml",
+        ong_config_path="config/overnight_config.yaml",
+    )
     if nikkei_daily is not None:
         ong_engine.set_nikkei_daily(nikkei_daily)
     ong_result = ong_engine.run(ong_daily_data)
