@@ -1,7 +1,5 @@
 """
-バックテスト実行スクリプト: シンプル順張り戦略
-
-四象限バックテスト 第1象限: 順張り × 値幅3%以上
+バックテスト実行スクリプト: シンプル順張り(値幅 ≥ 3.0%)
 
 実行方法:
     python main_backtest_simple_momentum.py [--output <dir>]
@@ -41,8 +39,8 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from backtest.simple_momentum_engine import SimpleMomentumBacktestEngine
-from backtest.pair_meanrev_engine import PairBacktestResult
-from strategy.pair_mean_reversion import UNIVERSE
+from backtest.models import PairBacktestResult
+from strategy.universe import UNIVERSE
 
 # ---------------------------------------------------------------------------
 # ロギング設定
@@ -319,7 +317,7 @@ def save_report_txt(report_text: str, save_path: str) -> None:
 def parse_args() -> argparse.Namespace:
     """コマンドライン引数を解析する。"""
     parser = argparse.ArgumentParser(
-        description="シンプル順張り戦略バックテスト（四象限 第1象限: 順張り×値幅3%以上）"
+        description="シンプル順張り(値幅 ≥ 3.0%)バックテスト"
     )
     parser.add_argument(
         "--output",
@@ -349,8 +347,7 @@ def main() -> None:
     os.makedirs(args.output, exist_ok=True)
 
     print("\n" + "=" * 60)
-    print("  シンプル順張り戦略 バックテスト")
-    print("  四象限 第1象限: 順張り × 値幅3%以上")
+    print("  シンプル順張り(値幅 ≥ 3.0%) バックテスト")
     print("  (前場騰落率≥+3% → ロング / ≤-3% → ショート → 後場寄り成行決済)")
     print("=" * 60)
 
