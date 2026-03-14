@@ -191,8 +191,11 @@ def load_all_data() -> tuple[dict, dict, pd.DataFrame, pd.DataFrame]:
         print(f"{status_5m}  {status_1d}")
 
     # TOPIX データを分離
-    topix_intraday = download_intraday(TOPIX_TICKER) or pd.DataFrame()
-    topix_daily = daily_data.get(TOPIX_TICKER) or pd.DataFrame()
+    _topix_5m = download_intraday(TOPIX_TICKER)
+    topix_intraday = _topix_5m if _topix_5m is not None else pd.DataFrame()
+
+    _topix_1d = daily_data.get(TOPIX_TICKER)
+    topix_daily = _topix_1d if _topix_1d is not None else pd.DataFrame()
 
     print(
         f"\n  取得完了: 5分足={len(intraday_data)}銘柄  "
