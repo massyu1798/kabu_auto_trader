@@ -95,14 +95,31 @@ class PairMeanReversionEngine:
         self.max_late_momentum_pct: float = float(filt["max_late_momentum_pct"])
         self.max_topix_move_pct: float = float(filt["max_topix_move_pct"])
         self.max_same_sector_per_side: int = int(filt["max_same_sector_per_side"])
-        self.max_volume_ratio: float = float(filt.get("max_volume_ratio", 5.0))
         self.max_topix_late_move_pct: float = float(filt.get("max_topix_late_move_pct", 0.5))
-        # 新規フィルタパラメータ
-        self.volume_ratio_exclude_threshold: float = float(
-            filt.get("volume_ratio_exclude_threshold", 5.0)
+        # 出来高急増フィルタ（新旧パラメータ名の優先順位: max_volume_ratio_exclude > volume_ratio_exclude_threshold > max_volume_ratio）
+        exclude_threshold = (
+            filt.get("max_volume_ratio_exclude")
+            or filt.get("volume_ratio_exclude_threshold")
+            or filt.get("max_volume_ratio", 5.0)
         )
+        self.volume_ratio_exclude_threshold: float = float(exclude_threshold)
+        self.max_volume_ratio: float = self.volume_ratio_exclude_threshold
+        # ギャップフィルタ
         self.max_gap_pct: float = float(filt.get("max_gap_pct", 3.0))
+        # セクター制御
         self.max_same_sector_total: int = int(filt.get("max_same_sector_total", 2))
+        # ★ NEW: 前場レンジ / ATR(14) 比率フィルタ
+        self.max_range_atr_ratio: float = float(filt.get("max_range_atr_ratio", 2.0))
+        # ★ NEW: 前場終盤（11:15〜11:25）急変フィルタ
+        self.max_late_surge_pct: float = float(filt.get("max_late_surge_pct", 1.5))
+        # ★ NEW: ロング・ショート間でも同セクター重複を回避
+        self.no_cross_sector_overlap: bool = bool(filt.get("no_cross_sector_overlap", False))
+
+        r = self.config.get("risk", {})
+        # ★ NEW: ネットエクスポージャ（ロング金額 - ショート金額）±5%以内
+        self.max_net_exposure_pct: float = float(r.get("max_net_exposure_pct", 0.05))
+        # ★ NEW: β調整オプション
+        self.beta_adjust: bool = bool(r.get("beta_adjust", False))
 
         et = self.config.get("entry_thresholds", {})
         self.long_daily_return_min: float = float(et.get("long_daily_return_min", 0.01))
@@ -177,6 +194,7 @@ class PairMeanReversionEngine:
         prev_close_dict: dict[str, float],
         topix_return: float,
         avg_volume_dict: Optional[dict[str, float]] = None,
+        atr_dict: Optional[dict[str, float]] = None,
     ) -> pd.DataFrame:
         """全銘柄の特徴量を計算して DataFrame を返す。
 
@@ -187,12 +205,16 @@ class PairMeanReversionEngine:
             - vwap_deviation        : 前場 VWAP 乖離率
             - volume_ratio          : 前場出来高倍率（20 日平均比）
             - morning_turnover      : 前場売買代金（フィルタ用）
+            - late_surge_pct        : 前場終盤急変率（11:15〜11:25 / 100）★NEW
+            - morning_range         : 前場高値-安値（ATRフィルタ用）★NEW
+            - prev_atr              : 前日ATR(14)（ATRフィルタ用）★NEW
 
         Args:
             morning_data_dict: 銘柄→前場 5 分足 DataFrame の辞書
             prev_close_dict:   銘柄→前日終値の辞書
             topix_return:      TOPIX 前場リターン（小数）
             avg_volume_dict:   銘柄→20 日平均出来高の辞書（省略可）
+            atr_dict:          銘柄→前日 ATR(14) の辞書（省略可）★NEW
 
         Returns:
             特徴量 DataFrame（index = ticker）
@@ -221,6 +243,13 @@ class PairMeanReversionEngine:
             if close_1100 is None or close_1100 <= 0:
                 # フォールバック: 当日の最初のバー close
                 close_1100 = float(df["close"].iloc[0])
+
+            # ★ NEW: 11:15 バーの close（前場終盤急変フィルタ用）
+            close_1115 = self._get_price_at(df, 11, 15)
+            if close_1115 is None or close_1115 <= 0:
+                close_1115 = self._get_price_at(df, 11, 10)
+            if close_1115 is None or close_1115 <= 0:
+                close_1115 = close_1100  # フォールバック
 
             # 当日始値（寄付き価格）：ギャップフィルタ用
             open_price = float(df["open"].iloc[0])
@@ -253,7 +282,20 @@ class PairMeanReversionEngine:
             # 前場売買代金（フィルタ用）
             morning_turnover = float((df["close"] * df["volume"]).sum())
 
-            if volume_ratio >= self.max_volume_ratio:
+            # ★ NEW: 前場終盤急変率（11:15〜11:25）
+            late_surge_pct = (
+                (close_1125 - close_1115) / close_1115 if close_1115 > 0 else 0.0
+            )
+
+            # ★ NEW: 前場レンジ（高値 - 安値）
+            morning_high = float(df["high"].max())
+            morning_low = float(df["low"].min())
+            morning_range = morning_high - morning_low
+
+            # ★ NEW: 前日 ATR(14) — atr_dict から取得（なければ 0）
+            prev_atr = (atr_dict or {}).get(ticker, 0.0)
+
+            if volume_ratio >= self.volume_ratio_exclude_threshold:
                 logger.debug(
                     f"{ticker}: 出来高倍率 {volume_ratio:.1f}x — 急増銘柄（フィルタ対象）"
                 )
@@ -274,6 +316,9 @@ class PairMeanReversionEngine:
                     "volume_ratio": volume_ratio,
                     "morning_turnover": morning_turnover,
                     "morning_volume": morning_volume,
+                    "late_surge_pct": late_surge_pct,
+                    "morning_range": morning_range,
+                    "prev_atr": prev_atr,
                 }
             )
 
@@ -351,11 +396,13 @@ class PairMeanReversionEngine:
         適用フィルタ:
             1. TOPIX 地合いフィルタ（前場 ±2% 超で全見送り）
             2. TOPIX 終盤急変フィルタ（11:00〜11:25 の変化 ±0.5% 超で全見送り）
-            3. 流動性フィルタ（前場売買代金 ≥ 30 億円）
+            3. 流動性フィルタ（前場売買代金 ≥ 20 億円）
             4. 値動き異常フィルタ（|当日騰落率| > 5%）
             5. 後半モメンタム異常フィルタ（|後半 momentum| > 3%）
             6. 出来高急増フィルタ（出来高倍率 > volume_ratio_exclude_threshold）
             7. ギャップフィルタ（|寄付きギャップ| > max_gap_pct%）
+            8. ★ NEW: ATR 比率フィルタ（前場レンジ >= max_range_atr_ratio × ATR(14)）
+            9. ★ NEW: 前場終盤急変フィルタ（|11:15〜11:25| > max_late_surge_pct%）
 
         Note:
             スコア閾値フィルタは select_candidates → calc_scores 後に適用する。
@@ -409,15 +456,47 @@ class PairMeanReversionEngine:
         # 6. 出来高急増フィルタ（材料株除外: 決算・IR等の代理指標）
         n_before = len(result)
         result = result[result["volume_ratio"] <= self.volume_ratio_exclude_threshold]
-        logger.debug(f"出来高急増フィルタ: {n_before} → {len(result)} 銘柄")
+        logger.debug(
+            f"出来高急増フィルタ: {n_before} → {len(result)} 銘柄 "
+            f"({n_before - len(result)}銘柄除外)"
+        )
 
         # 7. ギャップフィルタ（寄付きからのギャップが大きすぎる銘柄を除外）
         if "gap_pct" in result.columns:
             n_before = len(result)
             result = result[result["gap_pct"].abs() * 100.0 <= self.max_gap_pct]
+            logger.debug(
+                f"ギャップフィルタ: {n_before} → {len(result)} 銘柄 "
+                f"({n_before - len(result)}銘柄除外)"
+            )
+
+        # 8. ★ NEW: ATR 比率フィルタ（前場高値-安値レンジが前日ATR(14)の2倍以上を除外）
+        if "morning_range" in result.columns and "prev_atr" in result.columns:
+            n_before = len(result)
+            # prev_atr が 0 の場合はフィルタ対象外（データなし）
+            has_atr = result["prev_atr"] > 0
+            range_ratio = result["morning_range"] / result["prev_atr"].replace(0, float("nan"))
+            too_volatile = has_atr & (range_ratio >= self.max_range_atr_ratio)
+            result = result[~too_volatile]
             n_removed = n_before - len(result)
             if n_removed > 0:
-                logger.debug(f"ギャップフィルタ: {n_before} → {len(result)} 銘柄 ({n_removed}銘柄除外)")
+                logger.debug(
+                    f"ATR比率フィルタ: {n_before} → {len(result)} 銘柄 "
+                    f"(レンジ/{self.max_range_atr_ratio}×ATR超: {n_removed}銘柄除外)"
+                )
+
+        # 9. ★ NEW: 前場終盤急変フィルタ（11:15〜11:25）
+        if "late_surge_pct" in result.columns:
+            n_before = len(result)
+            result = result[
+                result["late_surge_pct"].abs() * 100.0 <= self.max_late_surge_pct
+            ]
+            n_removed = n_before - len(result)
+            if n_removed > 0:
+                logger.debug(
+                    f"前場終盤急変フィルタ: {n_before} → {len(result)} 銘柄 "
+                    f"(11:15〜11:25 急変±{self.max_late_surge_pct}%超: {n_removed}銘柄除外)"
+                )
 
         return result
 
@@ -475,6 +554,8 @@ class PairMeanReversionEngine:
         self,
         long_pool: pd.DataFrame,
         short_pool: pd.DataFrame,
+        capital: float = 0.0,
+        beta_dict: Optional[dict[str, float]] = None,
     ) -> tuple[list[str], list[str]]:
         """セクター偏り制御付きでロング・ショートの銘柄を最終選定する。
 
@@ -482,59 +563,19 @@ class PairMeanReversionEngine:
             - ロング候補を score 降順（最も上昇モメンタムが強い）で並べ、最大 max_positions_per_side 銘柄
             - ショート候補を score 昇順（最も下落モメンタムが強い）で並べ、最大 max_positions_per_side 銘柄
             - 各サイドで同一セクターは max_same_sector_per_side 件まで
-            - ロング+ショート合計で同一セクターは max_same_sector_total 件まで
+            - no_cross_sector_overlap=True の場合: ロング選定済みセクターはショートに入れない
+            - no_cross_sector_overlap=False の場合: ロング+ショート合計で max_same_sector_total 件まで
             - ペアである必要はない。ロングのみ / ショートのみも可。
 
         Args:
-            long_pool:  select_candidates() + calc_scores() 後のロング候補 DataFrame
-            short_pool: select_candidates() + calc_scores() 後のショート候補 DataFrame
+            long_pool:   select_candidates() + calc_scores() 後のロング候補 DataFrame
+            short_pool:  select_candidates() + calc_scores() 後のショート候補 DataFrame
+            capital:     現在の資本（ネットエクスポージャ計算用、0で無効）
+            beta_dict:   銘柄→β値の辞書（beta_adjust=True 時のサイジング用）
 
         Returns:
             (long_tickers, short_tickers) のタプル
         """
-        def _select(
-            pool: pd.DataFrame,
-            score_ascending: bool,
-            n: int,
-            sector_count_ref: Optional[dict[str, int]] = None,
-        ) -> list[str]:
-            """セクター偏り制御付きで銘柄を選定する内部ヘルパー。
-
-            Args:
-                pool:             候補 DataFrame
-                score_ascending:  True=スコア昇順（ショート）、False=降順（ロング）
-                n:                選定最大数
-                sector_count_ref: 既に選定済みのセクター集計（合計制約用）
-
-            Returns:
-                選定された ticker のリスト
-            """
-            if pool.empty:
-                return []
-            sorted_pool = pool.sort_values("score", ascending=score_ascending)
-            selected: list[str] = []
-            sector_count: dict[str, int] = {}
-            # ロング側のセクター集計をコピーして、ショート選定中の合計カウンタとして使用する
-            combined_count: dict[str, int] = dict(sector_count_ref) if sector_count_ref else {}
-            for ticker, row in sorted_pool.iterrows():
-                if len(selected) >= n:
-                    break
-                sector = str(row.get("sector", "unknown"))
-                # 片側制約チェック
-                if sector_count.get(sector, 0) >= self.max_same_sector_per_side:
-                    continue
-                # 合計制約チェック（ロング+ショート合算）
-                if combined_count.get(sector, 0) >= self.max_same_sector_total:
-                    logger.debug(
-                        f"{ticker}({sector}): セクター合計上限 "
-                        f"{self.max_same_sector_total} に到達 → スキップ"
-                    )
-                    continue
-                selected.append(str(ticker))
-                sector_count[sector] = sector_count.get(sector, 0) + 1
-                combined_count[sector] = combined_count.get(sector, 0) + 1
-            return selected
-
         # まずロングを選定し、そのセクター集計をショート選定に引き継ぐ
         long_sector_count: dict[str, int] = {}
         long_tickers: list[str] = []
@@ -549,13 +590,44 @@ class PairMeanReversionEngine:
                 long_tickers.append(str(ticker))
                 long_sector_count[sector] = long_sector_count.get(sector, 0) + 1
 
-        # ショート選定時にロング側のセクター集計を考慮
-        short_tickers = _select(
-            short_pool,
-            score_ascending=True,
-            n=self.max_positions_per_side,
-            sector_count_ref=long_sector_count,
-        )
+        # ★ ショート選定: no_cross_sector_overlap に応じてセクター制御を切替
+        short_tickers: list[str] = []
+        if not short_pool.empty:
+            sorted_short = short_pool.sort_values("score", ascending=True)
+            short_sector_count: dict[str, int] = {}
+            # no_cross_sector_overlap=True → ロング選定済みセクターを完全除外
+            # no_cross_sector_overlap=False → 合計カウンタで max_same_sector_total まで許可
+            combined_count: dict[str, int] = dict(long_sector_count)
+
+            for ticker, row in sorted_short.iterrows():
+                if len(short_tickers) >= self.max_positions_per_side:
+                    break
+                sector = str(row.get("sector", "unknown"))
+
+                # 片側制約チェック
+                if short_sector_count.get(sector, 0) >= self.max_same_sector_per_side:
+                    continue
+
+                if self.no_cross_sector_overlap:
+                    # ロング・ショート間での同セクター重複を完全回避
+                    if sector in long_sector_count:
+                        logger.debug(
+                            f"{ticker}({sector}): ロング側と同セクター "
+                            f"(no_cross_sector_overlap=True) → スキップ"
+                        )
+                        continue
+                else:
+                    # 合計制約チェック（ロング+ショート合算）
+                    if combined_count.get(sector, 0) >= self.max_same_sector_total:
+                        logger.debug(
+                            f"{ticker}({sector}): セクター合計上限 "
+                            f"{self.max_same_sector_total} に到達 → スキップ"
+                        )
+                        continue
+
+                short_tickers.append(str(ticker))
+                short_sector_count[sector] = short_sector_count.get(sector, 0) + 1
+                combined_count[sector] = combined_count.get(sector, 0) + 1
 
         return long_tickers, short_tickers
 
@@ -565,6 +637,9 @@ class PairMeanReversionEngine:
         prev_close_dict: dict[str, float],
         topix_data: Optional[pd.DataFrame],
         avg_volume_dict: Optional[dict[str, float]] = None,
+        atr_dict: Optional[dict[str, float]] = None,
+        beta_dict: Optional[dict[str, float]] = None,
+        capital: float = 0.0,
     ) -> Optional[tuple[list[str], list[str]]]:
         """1 日分のシグナルを生成するラッパーメソッド。
 
@@ -578,6 +653,9 @@ class PairMeanReversionEngine:
             prev_close_dict:   銘柄→前日終値の辞書（"1306.T" を含む）
             topix_data:        TOPIX ETF（1306.T）の前場 5 分足 DataFrame
             avg_volume_dict:   銘柄→20 日平均出来高の辞書（省略可）
+            atr_dict:          銘柄→前日 ATR(14) の辞書（省略可）★NEW
+            beta_dict:         銘柄→β値の辞書（beta_adjust=True 時用）★NEW
+            capital:           現在の資本（ネットエクスポージャ計算用、0で無効）★NEW
 
         Returns:
             (long_tickers, short_tickers) または None（シグナルなし）
@@ -614,15 +692,15 @@ class PairMeanReversionEngine:
             f"  終盤変化: {topix_late_move * 100:.2f}%"
         )
 
-        # 特徴量計算
+        # 特徴量計算（★ atr_dict を追加）
         features_df = self.calc_features(
-            morning_data_dict, prev_close_dict, topix_return, avg_volume_dict
+            morning_data_dict, prev_close_dict, topix_return, avg_volume_dict, atr_dict
         )
         if features_df.empty:
             logger.debug("特徴量が空: 対象銘柄なし")
             return None
 
-        # フィルタ適用（地合い・流動性・値動き異常・出来高急増）
+        # フィルタ適用（地合い・流動性・値動き異常・出来高急増・ATR・終盤急変）
         filtered_df = self.apply_filters(features_df, topix_return, topix_late_move)
         if filtered_df.empty:
             logger.debug("全銘柄フィルタアウト")
@@ -649,7 +727,9 @@ class PairMeanReversionEngine:
         short_scored = scored[scored.index.isin(short_pool.index)]
 
         # 最終選定（セクター偏り制御付き）
-        long_tickers, short_tickers = self.select_pairs(long_scored, short_scored)
+        long_tickers, short_tickers = self.select_pairs(
+            long_scored, short_scored, capital=capital, beta_dict=beta_dict
+        )
 
         if not long_tickers and not short_tickers:
             logger.debug("選定銘柄なし（スコア・セクター制約）")

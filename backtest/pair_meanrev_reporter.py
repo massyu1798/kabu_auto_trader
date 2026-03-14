@@ -264,6 +264,10 @@ def generate_full_report(
   最大:              {daily_max:>+15,.0f} 円
   最小:              {daily_min:>+15,.0f} 円
 
+■ 連勝/連敗記録
+  最大連勝日数:      {result.max_win_streak:>5d} 日
+  最大連敗日数:      {result.max_loss_streak:>5d} 日
+
 ■ LONG / SHORT 内訳
   LONG:   {len(long_trades):>4d}件  勝ち{len(long_wins):>3d}件  勝率{long_wr:5.1f}%  PnL={long_pnl:>+12,.0f} 円
   SHORT:  {len(short_trades):>4d}件  勝ち{len(short_wins):>3d}件  勝率{short_wr:5.1f}%  PnL={short_pnl:>+12,.0f} 円

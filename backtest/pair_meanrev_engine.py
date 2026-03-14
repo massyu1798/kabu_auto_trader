@@ -68,6 +68,9 @@ class PairBacktestResult:
     equity_curve: list[float] = field(default_factory=list)
     dates: list = field(default_factory=list)
     daily_pnl: dict[str, float] = field(default_factory=dict)
+    # ★ NEW: 連勝/連敗記録
+    max_win_streak: int = 0   # 最大連勝日数
+    max_loss_streak: int = 0  # 最大連敗日数
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +114,10 @@ class PairMeanRevBacktestEngine:
         self.max_daily_loss: float = float(r["max_daily_loss"])
         self.max_consecutive_losses: int = int(r.get("max_consecutive_losses", 5))
         self.max_gross_exposure_pct: float = float(r.get("max_gross_exposure_pct", 1.0))
+        # ★ NEW: ネットエクスポージャ制限（ロング金額 - ショート金額）
+        self.max_net_exposure_pct: float = float(r.get("max_net_exposure_pct", 0.05))
+        # ★ NEW: β調整オプション
+        self.beta_adjust: bool = bool(r.get("beta_adjust", False))
 
         self.strategy = PairMeanReversionEngine(config_path)
 
@@ -212,6 +219,103 @@ class PairMeanRevBacktestEngine:
         except Exception as exc:
             logger.debug(f"_get_avg_volume 失敗: {exc}")
             return None
+
+    def _get_atr(
+        self,
+        daily_df: pd.DataFrame,
+        trade_date: pd.Timestamp,
+        window: int = 14,
+    ) -> Optional[float]:
+        """日足データから ATR(14) を算出する（ルックアヘッドバイアス回避）。
+
+        ATR = 直近 window 日のTrue Range（High-Low, |High-PrevClose|, |Low-PrevClose| の最大）の平均。
+
+        Args:
+            daily_df:   日足 DataFrame（open/high/low/close を含む）
+            trade_date: 取引日（この日より前のデータのみ使用）
+            window:     ATR 計算ウィンドウ（デフォルト 14）
+
+        Returns:
+            ATR 値（データ不足時は None）
+        """
+        if daily_df.empty:
+            return None
+        try:
+            trade_day = trade_date.date()
+            idx_dates = [
+                d.date() if hasattr(d, "date") else d for d in daily_df.index
+            ]
+            prev_dates = sorted(d for d in idx_dates if d < trade_day)
+            # True Range は 2 本以上の足が必要
+            if len(prev_dates) < window + 1:
+                return None
+            recent = prev_dates[-(window + 1):]
+            positions = [idx_dates.index(d) for d in recent]
+            sub = daily_df.iloc[positions]
+            highs = sub["high"].values
+            lows = sub["low"].values
+            closes = sub["close"].values
+            tr_list = []
+            for i in range(1, len(sub)):
+                hl = highs[i] - lows[i]
+                hc = abs(highs[i] - closes[i - 1])
+                lc = abs(lows[i] - closes[i - 1])
+                tr_list.append(max(hl, hc, lc))
+            if not tr_list:
+                return None
+            return float(sum(tr_list[-window:]) / len(tr_list[-window:]))
+        except Exception as exc:
+            logger.debug(f"_get_atr 失敗: {exc}")
+            return None
+
+    def _calc_beta(
+        self,
+        daily_df: pd.DataFrame,
+        topix_daily_df: pd.DataFrame,
+        trade_date: pd.Timestamp,
+        window: int = 60,
+    ) -> float:
+        """過去 window 日の日足データから市場β（対 TOPIX）を算出する。
+
+        β = Cov(stock, topix) / Var(topix)
+
+        Args:
+            daily_df:       銘柄の日足 DataFrame
+            topix_daily_df: TOPIX ETF の日足 DataFrame
+            trade_date:     取引日
+            window:         回帰ウィンドウ（デフォルト 60 日）
+
+        Returns:
+            β値（データ不足時は 1.0）
+        """
+        try:
+            trade_day = trade_date.date()
+
+            def _get_returns(df: pd.DataFrame) -> list[float]:
+                idx_dates = [d.date() if hasattr(d, "date") else d for d in df.index]
+                prev_dates = sorted(d for d in idx_dates if d < trade_day)
+                if len(prev_dates) < window + 1:
+                    return []
+                recent = prev_dates[-(window + 1):]
+                positions = [idx_dates.index(d) for d in recent]
+                closes = df["close"].iloc[positions].values
+                return [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes))]
+
+            stock_rets = _get_returns(daily_df)
+            topix_rets = _get_returns(topix_daily_df)
+            n = min(len(stock_rets), len(topix_rets))
+            if n < 10:
+                return 1.0
+            s = stock_rets[-n:]
+            t = topix_rets[-n:]
+            s_mean = sum(s) / n
+            t_mean = sum(t) / n
+            cov = sum((s[i] - s_mean) * (t[i] - t_mean) for i in range(n)) / n
+            var_t = sum((t[i] - t_mean) ** 2 for i in range(n)) / n
+            return float(cov / var_t) if var_t > 0 else 1.0
+        except Exception as exc:
+            logger.debug(f"_calc_beta 失敗: {exc}")
+            return 1.0
 
     def _entry_price(self, raw: float, side: Side) -> float:
         """エントリー価格を算出する（スリッページ適用）。"""
@@ -325,6 +429,11 @@ class PairMeanRevBacktestEngine:
 
         prev_daily_loss = 0.0  # 直前の日次損失（停止判定用）
         consecutive_losses = 0  # 連敗カウンタ
+        # ★ NEW: 連勝/連敗追跡
+        current_win_streak = 0
+        current_loss_streak = 0
+        max_win_streak = 0
+        max_loss_streak = 0
 
         for trade_date in trading_dates:
             date_str = str(trade_date.date())
@@ -342,10 +451,12 @@ class PairMeanRevBacktestEngine:
                 continue
 
             # ----------------------------------------------------------
-            # 前日終値・20 日平均出来高
+            # 前日終値・20 日平均出来高・ATR(14)・β
             # ----------------------------------------------------------
             prev_close: dict[str, float] = {}
             avg_volume: dict[str, float] = {}
+            atr_dict: dict[str, float] = {}
+            beta_dict: dict[str, float] = {}
             all_tickers = list(UNIVERSE.keys()) + ["1306.T"]
 
             for ticker in all_tickers:
@@ -360,6 +471,16 @@ class PairMeanRevBacktestEngine:
                     av = self._get_avg_volume(daily_df, trade_date)
                     if av is not None:
                         avg_volume[ticker] = av
+                    # ★ NEW: ATR(14) 算出
+                    if ticker != "1306.T":
+                        atr_val = self._get_atr(daily_df, trade_date)
+                        if atr_val is not None and atr_val > 0:
+                            atr_dict[ticker] = atr_val
+                    # ★ NEW: β算出（beta_adjust=True の場合のみ）
+                    if self.beta_adjust and ticker != "1306.T" and topix_daily is not None:
+                        beta_dict[ticker] = self._calc_beta(
+                            daily_df, topix_daily, trade_date
+                        )
 
             # ----------------------------------------------------------
             # TOPIX 前場データ
@@ -395,10 +516,16 @@ class PairMeanRevBacktestEngine:
                 continue
 
             # ----------------------------------------------------------
-            # シグナル生成
+            # シグナル生成（★ atr_dict・beta_dict を追加）
             # ----------------------------------------------------------
             signal = self.strategy.generate_daily_signal(
-                morning_data, prev_close, topix_morning, avg_volume
+                morning_data,
+                prev_close,
+                topix_morning,
+                avg_volume,
+                atr_dict=atr_dict,
+                beta_dict=beta_dict,
+                capital=capital,
             )
 
             if signal is None:
@@ -424,6 +551,10 @@ class PairMeanRevBacktestEngine:
             # グロスエクスポージャ上限（初期資金 × max_gross_exposure_pct）
             gross_exposure_limit = self.initial_capital * self.max_gross_exposure_pct
             current_gross_exposure = 0.0
+            # ★ NEW: ネットエクスポージャ追跡（ロング金額 - ショート金額）
+            net_exposure_limit = capital * self.max_net_exposure_pct
+            current_long_value = 0.0
+            current_short_value = 0.0
 
             for ticker, side in selected:
                 df = intraday_data.get(ticker)
@@ -460,6 +591,30 @@ class PairMeanRevBacktestEngine:
                         f"> {gross_exposure_limit:,.0f}) → スキップ"
                     )
                     continue
+
+                # ★ NEW: ネットエクスポージャチェック（ロング金額 - ショート金額）
+                if self.max_net_exposure_pct > 0 and net_exposure_limit > 0:
+                    new_long = (
+                        current_long_value + position_notional
+                        if side == Side.LONG
+                        else current_long_value
+                    )
+                    new_short = (
+                        current_short_value + position_notional
+                        if side == Side.SHORT
+                        else current_short_value
+                    )
+                    net_exp = abs(new_long - new_short)
+                    if net_exp > net_exposure_limit:
+                        logger.debug(
+                            f"  {ticker}: ネットエクスポージャ上限到達 "
+                            f"(net={net_exp:,.0f} > limit={net_exposure_limit:,.0f}) → スキップ"
+                        )
+                        continue
+                    if side == Side.LONG:
+                        current_long_value += position_notional
+                    else:
+                        current_short_value += position_notional
                 current_gross_exposure += position_notional
 
                 # SL / TP 価格
@@ -557,8 +712,16 @@ class PairMeanRevBacktestEngine:
             # 連敗カウンタ更新
             if day_pnl < 0:
                 consecutive_losses += 1
+                current_loss_streak += 1
+                current_win_streak = 0
+                if current_loss_streak > max_loss_streak:
+                    max_loss_streak = current_loss_streak
             else:
                 consecutive_losses = 0
+                current_win_streak += 1
+                current_loss_streak = 0
+                if current_win_streak > max_win_streak:
+                    max_win_streak = current_win_streak
 
             all_trades.extend(day_trades)
             equity_curve.append(capital)
@@ -574,6 +737,8 @@ class PairMeanRevBacktestEngine:
             equity_curve=equity_curve,
             dates=equity_dates,
             daily_pnl=daily_pnl,
+            max_win_streak=max_win_streak,
+            max_loss_streak=max_loss_streak,
         )
 
     # ------------------------------------------------------------------
@@ -769,6 +934,10 @@ class PairMeanRevBacktestEngine:
   標準偏差:          {daily_std:>15,.0f} 円
   最大:              {daily_max:>+15,.0f} 円
   最小:              {daily_min:>+15,.0f} 円
+
+■ 連勝/連敗記録
+  最大連勝日数:      {result.max_win_streak:>5d} 日
+  最大連敗日数:      {result.max_loss_streak:>5d} 日
 
 ■ LONG / SHORT 内訳
   LONG:   {len(long_trades):>4d}件  勝ち{len(long_wins):>3d}件  勝率{long_wr:5.1f}%  PnL={long_pnl:>+12,.0f} 円
