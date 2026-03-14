@@ -1,0 +1,39 @@
+global:
+  initial_capital: 5000000        # 信用取引金額500万
+  max_positions_per_side: 2       # ロング2、ショート2
+  risk_per_position: 0.25         # 1銘柄あたり資金の25%
+  commission_rate: 0.0            # デイトレ信用手数料無料
+  slippage_rate: 0.001            # スリッページ0.1%
+
+timing:
+  signal_eval_time: 1125          # シグナル評価時刻
+  entry_time: 1130                # エントリー時刻（前場引け）
+  exit_mode: "immediate"          # "immediate"=後場寄り / "delayed"=12:35決済
+  exit_time_immediate: 1230       # 後場寄り
+  exit_time_delayed: 1235         # 遅延決済
+  force_close_time: 1235          # タイムストップ
+
+scoring:
+  weights:
+    daily_return: 0.30
+    relative_return: 0.25
+    late_morning_momentum: 0.20
+    vwap_deviation: 0.15
+    volume_ratio: 0.10
+  min_abs_score_threshold: 0.5    # 最低スコア閾値（スコア絶対値がこれ以上の銘柄のみ採用）
+
+filters:
+  min_morning_turnover: 2000000000  # 前場売買代金20億
+  max_daily_return_pct: 5.0       # 騰落率±5%超除外
+  max_late_momentum_pct: 3.0      # 後半モメンタム±3%超除外
+  max_volume_ratio_alert: 3.0     # 出来高倍率3倍以上で要注意（ログ出力）
+  max_topix_move_pct: 2.0         # TOPIX前場±2%超で見送り
+  max_same_sector_per_side: 1     # 同一セクター片側最大1
+
+exit:
+  stop_loss_pct: 0.006            # 損切り0.6%
+  take_profit_pct: 0.004          # 利確0.4%
+  force_close_time: 1235          # 強制決済
+
+risk:
+  max_daily_loss: 0.015           # 日次損失1.5%で停止
