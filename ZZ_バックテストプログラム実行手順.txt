@@ -17,7 +17,7 @@ python main_backtest_afternoon.py
 python main_backtest_combined.py
 
 オーバーナイトギャップ
-（合体経由で実行）
+python main_backtest_overnight.py
 
 シンプル順張り＋午前v12.4＋午後リバーサル＋ONG の4戦略合体バックテスト
 python main_backtest_all_combined.py
