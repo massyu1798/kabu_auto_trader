@@ -109,6 +109,8 @@ class PairMeanRevBacktestEngine:
 
         r = self.config["risk"]
         self.max_daily_loss: float = float(r["max_daily_loss"])
+        self.max_consecutive_losses: int = int(r.get("max_consecutive_losses", 5))
+        self.max_gross_exposure_pct: float = float(r.get("max_gross_exposure_pct", 1.0))
 
         self.strategy = PairMeanReversionEngine(config_path)
 
@@ -322,6 +324,7 @@ class PairMeanRevBacktestEngine:
         )
 
         prev_daily_loss = 0.0  # 直前の日次損失（停止判定用）
+        consecutive_losses = 0  # 連敗カウンタ
 
         for trade_date in trading_dates:
             date_str = str(trade_date.date())
@@ -377,6 +380,21 @@ class PairMeanRevBacktestEngine:
                 continue
 
             # ----------------------------------------------------------
+            # 連敗停止チェック
+            # ----------------------------------------------------------
+            if consecutive_losses >= self.max_consecutive_losses:
+                logger.info(
+                    f"[{date_str}] 連敗停止発動 "
+                    f"({consecutive_losses}連敗) → 本日見送り"
+                )
+                equity_curve.append(capital)
+                equity_dates.append(trade_date)
+                # 1 日クールダウン後に再開するためリセット。
+                # 再び max_consecutive_losses 連敗が蓄積された場合は再度発動する。
+                consecutive_losses = 0
+                continue
+
+            # ----------------------------------------------------------
             # シグナル生成
             # ----------------------------------------------------------
             signal = self.strategy.generate_daily_signal(
@@ -403,6 +421,10 @@ class PairMeanRevBacktestEngine:
                 + [(t, Side.SHORT) for t in short_tickers]
             )
 
+            # グロスエクスポージャ上限（初期資金 × max_gross_exposure_pct）
+            gross_exposure_limit = self.initial_capital * self.max_gross_exposure_pct
+            current_gross_exposure = 0.0
+
             for ticker, side in selected:
                 df = intraday_data.get(ticker)
                 if df is None:
@@ -428,6 +450,17 @@ class PairMeanRevBacktestEngine:
                 size = math.floor(position_value / ep)
                 if size <= 0:
                     continue
+
+                # グロスエクスポージャチェック
+                position_notional = ep * size
+                if current_gross_exposure + position_notional > gross_exposure_limit:
+                    logger.info(
+                        f"  {ticker}: グロスエクスポージャ上限到達 "
+                        f"({current_gross_exposure:,.0f} + {position_notional:,.0f} "
+                        f"> {gross_exposure_limit:,.0f}) → スキップ"
+                    )
+                    continue
+                current_gross_exposure += position_notional
 
                 # SL / TP 価格
                 if side == Side.LONG:
@@ -521,6 +554,12 @@ class PairMeanRevBacktestEngine:
             daily_pnl[date_str] = day_pnl
             prev_daily_loss = day_pnl if day_pnl < 0 else 0.0
 
+            # 連敗カウンタ更新
+            if day_pnl < 0:
+                consecutive_losses += 1
+            else:
+                consecutive_losses = 0
+
             all_trades.extend(day_trades)
             equity_curve.append(capital)
             equity_dates.append(trade_date)
@@ -544,14 +583,18 @@ class PairMeanRevBacktestEngine:
     def generate_report(
         self, result: PairBacktestResult, initial_capital: Optional[float] = None
     ) -> str:
-        """バックテスト結果のテキストレポートを生成する。
+        """バックテスト結果の詳細テキストレポートを生成する。
 
-        通常の勝率・PF・最大 DD に加えて以下を含む:
-            - LONG / SHORT 側別成績
-            - セクター別成績
-            - 日別損益サマリ（上位 / 下位 5 日）
-            - Sharpe 比率（√252 スケール）
-            - Calmar 比率
+        以下の評価指標を全て出力する:
+            - 基本統計: 勝率・総トレード数・勝ち/負け回数
+            - PnL 統計: 総損益・平均利益・平均損失・最大利益・最大損失
+            - リスク指標: PF・最大ドローダウン（金額・%）・Sharpe Ratio・Calmar Ratio
+            - 日別損益: 平均・標準偏差・最大・最小
+            - LONG/SHORT 別寄与: 合計 PnL・各勝率
+            - 銘柄別寄与: 合計 PnL・取引回数・勝率
+            - セクター別寄与: 合計 PnL・件数・勝率
+            - 月別 PnL: 月ごとの損益集計
+            - Exit 理由内訳
 
         Args:
             result:          run() の戻り値
@@ -577,32 +620,44 @@ class PairMeanRevBacktestEngine:
 
         avg_win = sum(t.pnl for t in wins) / len(wins) if wins else 0.0
         avg_loss = sum(t.pnl for t in losses) / len(losses) if losses else 0.0
+        max_win = max((t.pnl for t in trades), default=0.0)
+        max_loss = min((t.pnl for t in trades), default=0.0)
         gross_win = sum(t.pnl for t in wins)
         gross_loss = abs(sum(t.pnl for t in losses))
         pf = (gross_win / gross_loss) if gross_loss > 0 else float("inf")
 
-        # 最大ドローダウン
+        # 最大ドローダウン（金額・%）
         eq = result.equity_curve
         max_dd_pct = 0.0
+        max_dd_amount = 0.0
         if eq:
             peak = eq[0]
             for e in eq:
                 if e > peak:
                     peak = e
-                dd = (peak - e) / peak * 100.0 if peak > 0 else 0.0
-                if dd > max_dd_pct:
-                    max_dd_pct = dd
+                dd_amount = peak - e
+                dd_pct = dd_amount / peak * 100.0 if peak > 0 else 0.0
+                if dd_pct > max_dd_pct:
+                    max_dd_pct = dd_pct
+                    max_dd_amount = dd_amount
 
-        # Sharpe 比率（日次 PnL ベース）
+        # 日別損益統計
         daily_vals = list(result.daily_pnl.values())
         sharpe = 0.0
-        if len(daily_vals) >= 2:
-            mean_d = statistics.mean(daily_vals)
-            std_d = statistics.stdev(daily_vals)
-            if std_d > 0:
-                sharpe = (mean_d / std_d) * (252 ** 0.5)
+        daily_mean = 0.0
+        daily_std = 0.0
+        daily_max = 0.0
+        daily_min = 0.0
+        if daily_vals:
+            daily_mean = statistics.mean(daily_vals)
+            daily_max = max(daily_vals)
+            daily_min = min(daily_vals)
+            if len(daily_vals) >= 2:
+                daily_std = statistics.stdev(daily_vals)
+                if daily_std > 0:
+                    sharpe = (daily_mean / daily_std) * (252 ** 0.5)
 
-        # Calmar 比率
+        # Calmar 比率（年率リターン / 最大DD%）
         calmar = (total_ret / max_dd_pct) if max_dd_pct > 0 else float("inf")
 
         # LONG / SHORT 内訳
@@ -612,6 +667,28 @@ class PairMeanRevBacktestEngine:
         short_wins = [t for t in short_trades if t.pnl > 0]
         long_pnl = sum(t.pnl for t in long_trades)
         short_pnl = sum(t.pnl for t in short_trades)
+        long_wr = len(long_wins) / len(long_trades) * 100.0 if long_trades else 0.0
+        short_wr = len(short_wins) / len(short_trades) * 100.0 if short_trades else 0.0
+
+        # 銘柄別寄与
+        ticker_stats: dict[str, dict] = {}
+        for t in trades:
+            tk = t.ticker
+            if tk not in ticker_stats:
+                ticker_stats[tk] = {"pnl": 0.0, "count": 0, "wins": 0}
+            ticker_stats[tk]["pnl"] += t.pnl
+            ticker_stats[tk]["count"] += 1
+            if t.pnl > 0:
+                ticker_stats[tk]["wins"] += 1
+
+        ticker_lines = []
+        for tk, st in sorted(ticker_stats.items(), key=lambda x: -x[1]["pnl"]):
+            wr = st["wins"] / st["count"] * 100.0 if st["count"] > 0 else 0.0
+            name = UNIVERSE.get(tk, {}).get("name", tk)
+            ticker_lines.append(
+                f"    {tk:8s} {name:14s}  {st['pnl']:>+10,.0f}円  "
+                f"{st['count']:3d}件  勝率{wr:.0f}%"
+            )
 
         # セクター別成績
         sector_stats: dict[str, dict] = {}
@@ -631,6 +708,16 @@ class PairMeanRevBacktestEngine:
                 f"    {sec:12s}  {st['pnl']:>+10,.0f}円  "
                 f"{st['count']:3d}件  勝率{wr:.0f}%"
             )
+
+        # 月別 PnL
+        monthly_pnl: dict[str, float] = {}
+        for t in trades:
+            month_key = t.trade_date[:7]  # "YYYY-MM"
+            monthly_pnl[month_key] = monthly_pnl.get(month_key, 0.0) + t.pnl
+        monthly_lines = "\n".join(
+            f"    {month}  {v:>+10,.0f}円"
+            for month, v in sorted(monthly_pnl.items())
+        )
 
         # 日別損益（上位 / 下位 5 日）
         dpnl_items = sorted(result.daily_pnl.items(), key=lambda x: x[1])
@@ -663,7 +750,7 @@ class PairMeanRevBacktestEngine:
   初期資金:          {ic:>15,.0f} 円
   最終資産:          {equity_final:>15,.0f} 円
   純損益:            {total_pnl:>+15,.0f} 円 ({total_ret:+.2f}%)
-  最大DD:            {max_dd_pct:>14.2f} %
+  最大DD:            {max_dd_pct:>14.2f} %  ({max_dd_amount:>+12,.0f} 円)
   Sharpe 比率:       {sharpe:>14.3f}
   Calmar 比率:       {calmar:>14.3f}
 
@@ -673,14 +760,30 @@ class PairMeanRevBacktestEngine:
   負けトレード:      {len(losses):>5d} ({100 - win_rate:.1f}%)
   平均利益:          {avg_win:>+15,.0f} 円
   平均損失:          {avg_loss:>+15,.0f} 円
+  最大利益:          {max_win:>+15,.0f} 円
+  最大損失:          {max_loss:>+15,.0f} 円
   PF:                {pf:.3f}
 
+■ 日別損益統計
+  平均:              {daily_mean:>+15,.0f} 円
+  標準偏差:          {daily_std:>15,.0f} 円
+  最大:              {daily_max:>+15,.0f} 円
+  最小:              {daily_min:>+15,.0f} 円
+
 ■ LONG / SHORT 内訳
-  LONG:   {len(long_trades):>4d}件  勝ち{len(long_wins):>3d}件  PnL={long_pnl:>+12,.0f} 円
-  SHORT:  {len(short_trades):>4d}件  勝ち{len(short_wins):>3d}件  PnL={short_pnl:>+12,.0f} 円
+  LONG:   {len(long_trades):>4d}件  勝ち{len(long_wins):>3d}件  勝率{long_wr:5.1f}%  PnL={long_pnl:>+12,.0f} 円
+  SHORT:  {len(short_trades):>4d}件  勝ち{len(short_wins):>3d}件  勝率{short_wr:5.1f}%  PnL={short_pnl:>+12,.0f} 円
+
+■ 銘柄別寄与 (上位/下位 各10件)
+{chr(10).join(ticker_lines[:10]) if ticker_lines else "  データなし"}
+  ---
+{chr(10).join(ticker_lines[-10:]) if len(ticker_lines) > 10 else ""}
 
 ■ セクター別成績
 {chr(10).join(sector_lines) if sector_lines else "  データなし"}
+
+■ 月別 PnL
+{monthly_lines if monthly_lines else "  データなし"}
 
 ■ 日別損益 Top 5
 {best_lines if best_lines else "  データなし"}
