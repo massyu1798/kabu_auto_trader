@@ -3,7 +3,7 @@
 # ============================================
 
 global:
-  initial_capital: 7000000
+  initial_capital: 10000000
   max_positions: 5
   risk_per_trade: 0.008
   max_daily_loss: 0.03

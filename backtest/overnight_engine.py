@@ -98,6 +98,7 @@ class OvernightGapEngine:
                 # ── ポジションサイジング ─────────────────────────
                 risk_distance = atr_val * self.atr_risk_multiplier
                 size = int(self.max_risk_per_trade / risk_distance)
+                size = (size // 100) * 100   # 100株単位に丸める
                 if size <= 0:
                     continue
 
