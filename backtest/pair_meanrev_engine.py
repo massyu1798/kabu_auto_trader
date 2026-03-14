@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
+import statistics
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -596,7 +597,6 @@ class PairMeanRevBacktestEngine:
         daily_vals = list(result.daily_pnl.values())
         sharpe = 0.0
         if len(daily_vals) >= 2:
-            import statistics
             mean_d = statistics.mean(daily_vals)
             std_d = statistics.stdev(daily_vals)
             if std_d > 0:

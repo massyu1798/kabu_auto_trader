@@ -26,6 +26,8 @@ from datetime import date, timedelta
 from typing import Optional
 
 import matplotlib
+# Use the non-interactive Agg backend so the script works in headless environments
+# (servers, CI pipelines) that have no display.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -340,6 +342,7 @@ def main() -> None:
     intraday_data, daily_data, topix_intraday, topix_daily = load_all_data()
 
     if not intraday_data:
+        logger.error("5分足データが取得できませんでした。終了します。")
         print("\n⚠️ 5分足データが取得できませんでした。終了します。")
         sys.exit(1)
 

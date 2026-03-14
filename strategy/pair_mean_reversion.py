@@ -232,7 +232,7 @@ class PairMeanReversionEngine:
             morning_turnover = float((df["close"] * df["volume"]).sum())
 
             if volume_ratio >= self.max_volume_ratio_alert:
-                logger.debug(
+                logger.info(
                     f"{ticker}: 出来高倍率 {volume_ratio:.1f}x — 要注意"
                 )
 
