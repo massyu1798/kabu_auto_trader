@@ -292,7 +292,7 @@ class PairMeanRevBacktestEngine:
         """
         capital = self.initial_capital
         all_trades: list[PairTrade] = []
-        equity_curve: list[float] = [capital]
+        equity_curve: list[float] = []
         equity_dates: list = []
         daily_pnl: dict[str, float] = {}
 

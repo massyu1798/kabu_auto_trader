@@ -1,17 +1,17 @@
 global:
-  initial_capital: 5000000        # 信用取引金額500万
-  max_positions_per_side: 2       # ロング2、ショート2
-  risk_per_position: 0.25         # 1銘柄あたり資金の25%
-  commission_rate: 0.0            # デイトレ信用手数料無料
-  slippage_rate: 0.001            # スリッページ0.1%
+  initial_capital: 5000000
+  max_positions_per_side: 3        # 2→3に拡大
+  risk_per_position: 0.20          # 25%→20%に分散
+  commission_rate: 0.0             # デイトレ信用手数料無料
+  slippage_rate: 0.001             # スリッページ0.1%
 
 timing:
-  signal_eval_time: 1125          # シグナル評価時刻
-  entry_time: 1130                # エントリー時刻（前場引け）
-  exit_mode: "immediate"          # "immediate"=後場寄り / "delayed"=12:35決済
-  exit_time_immediate: 1230       # 後場寄り
-  exit_time_delayed: 1235         # 遅延決済
-  force_close_time: 1235          # タイムストップ
+  signal_eval_time: 1125           # シグナル評価時刻
+  entry_time: 1130                 # エントリー時刻（前場引け）
+  exit_mode: "immediate"           # "immediate"=後場寄り / "delayed"=12:35決済
+  exit_time_immediate: 1230        # 後場寄り
+  exit_time_delayed: 1235          # 遅延決済
+  force_close_time: 1235           # タイムストップ
 
 scoring:
   weights:
@@ -20,20 +20,30 @@ scoring:
     late_morning_momentum: 0.20
     vwap_deviation: 0.15
     volume_ratio: 0.10
-  min_abs_score_threshold: 0.5    # 最低スコア閾値（スコア絶対値がこれ以上の銘柄のみ採用）
+  min_abs_score_threshold: 0.3     # 0.5→0.3に下げる（閾値フィルタが別途あるため）
+
+entry_thresholds:
+  long_daily_return_max: -0.01     # 前日比-1.0%以下
+  long_relative_return_max: -0.007 # TOPIX比-0.7%以下
+  long_late_momentum_max: -0.003   # 後半-0.3%以下
+  short_daily_return_min: 0.01     # 前日比+1.0%以上
+  short_relative_return_min: 0.007 # TOPIX比+0.7%以上
+  short_late_momentum_min: 0.003   # 後半+0.3%以上
+  min_volume_ratio: 0.5            # 出来高が20日平均の0.5倍以上
 
 filters:
-  min_morning_turnover: 2000000000  # 前場売買代金20億
-  max_daily_return_pct: 5.0       # 騰落率±5%超除外
-  max_late_momentum_pct: 3.0      # 後半モメンタム±3%超除外
-  max_volume_ratio_alert: 3.0     # 出来高倍率3倍以上で要注意（ログ出力）
-  max_topix_move_pct: 2.0         # TOPIX前場±2%超で見送り
-  max_same_sector_per_side: 1     # 同一セクター片側最大1
+  min_morning_turnover: 3000000000 # 前場売買代金30億円（20億→30億に引き上げ）
+  max_daily_return_pct: 5.0        # 騰落率±5%超除外
+  max_late_momentum_pct: 3.0       # 後半モメンタム±3%超除外
+  max_volume_ratio: 5.0            # 出来高倍率5倍以上除外（材料株の可能性高い）
+  max_topix_move_pct: 2.0          # TOPIX前場±2%超で見送り
+  max_topix_late_move_pct: 0.5     # TOPIX終盤(11:00-11:25)急変フィルタ
+  max_same_sector_per_side: 1      # 同一セクター片側最大1
 
 exit:
-  stop_loss_pct: 0.006            # 損切り0.6%
-  take_profit_pct: 0.004          # 利確0.4%
-  force_close_time: 1235          # 強制決済
+  stop_loss_pct: 0.008             # 0.6%→0.8%に拡大
+  take_profit_pct: 0.005           # 0.4%→0.5%に拡大
+  force_close_time: 1235           # 強制決済
 
 risk:
-  max_daily_loss: 0.015           # 日次損失1.5%で停止
+  max_daily_loss: 0.02             # 1.5%→2.0%に緩和
