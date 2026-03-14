@@ -95,7 +95,17 @@ class PairMeanReversionEngine:
         self.max_late_momentum_pct: float = float(filt["max_late_momentum_pct"])
         self.max_topix_move_pct: float = float(filt["max_topix_move_pct"])
         self.max_same_sector_per_side: int = int(filt["max_same_sector_per_side"])
-        self.max_volume_ratio_alert: float = float(filt.get("max_volume_ratio_alert", 3.0))
+        self.max_volume_ratio: float = float(filt.get("max_volume_ratio", 5.0))
+        self.max_topix_late_move_pct: float = float(filt.get("max_topix_late_move_pct", 0.5))
+
+        et = self.config.get("entry_thresholds", {})
+        self.long_daily_return_max: float = float(et.get("long_daily_return_max", -0.01))
+        self.long_relative_return_max: float = float(et.get("long_relative_return_max", -0.007))
+        self.long_late_momentum_max: float = float(et.get("long_late_momentum_max", -0.003))
+        self.short_daily_return_min: float = float(et.get("short_daily_return_min", 0.01))
+        self.short_relative_return_min: float = float(et.get("short_relative_return_min", 0.007))
+        self.short_late_momentum_min: float = float(et.get("short_late_momentum_min", 0.003))
+        self.min_volume_ratio: float = float(et.get("min_volume_ratio", 0.5))
 
     # ------------------------------------------------------------------
     # 内部ヘルパー
@@ -231,9 +241,9 @@ class PairMeanReversionEngine:
             # 前場売買代金（フィルタ用）
             morning_turnover = float((df["close"] * df["volume"]).sum())
 
-            if volume_ratio >= self.max_volume_ratio_alert:
-                logger.info(
-                    f"{ticker}: 出来高倍率 {volume_ratio:.1f}x — 要注意"
+            if volume_ratio >= self.max_volume_ratio:
+                logger.debug(
+                    f"{ticker}: 出来高倍率 {volume_ratio:.1f}x — 急増銘柄（フィルタ対象）"
                 )
 
             records.append(
@@ -318,29 +328,33 @@ class PairMeanReversionEngine:
 
     def apply_filters(
         self,
-        scores_df: pd.DataFrame,
         features_df: pd.DataFrame,
         topix_return: float,
+        topix_late_move: float = 0.0,
     ) -> pd.DataFrame:
         """フィルタを適用し、異常銘柄・低流動性銘柄を除外する。
 
         適用フィルタ:
             1. TOPIX 地合いフィルタ（前場 ±2% 超で全見送り）
-            2. 流動性フィルタ（前場売買代金 ≥ 20 億円）
-            3. 値動き異常フィルタ（|当日騰落率| > 5%）
-            4. 後半モメンタム異常フィルタ（|後半 momentum| > 3%）
-            5. スコア閾値フィルタ（|score| < min_abs_score_threshold）
+            2. TOPIX 終盤急変フィルタ（11:00〜11:25 の変化 ±0.5% 超で全見送り）
+            3. 流動性フィルタ（前場売買代金 ≥ 30 億円）
+            4. 値動き異常フィルタ（|当日騰落率| > 5%）
+            5. 後半モメンタム異常フィルタ（|後半 momentum| > 3%）
+            6. 出来高急増フィルタ（出来高倍率 > max_volume_ratio）
+
+        Note:
+            スコア閾値フィルタは select_candidates → calc_scores 後に適用する。
 
         Args:
-            scores_df:    calc_scores() の出力 DataFrame
-            features_df:  calc_features() の出力 DataFrame（参照用）
-            topix_return: TOPIX 前場リターン（小数）
+            features_df:      calc_features() の出力 DataFrame
+            topix_return:     TOPIX 前場リターン（小数）
+            topix_late_move:  TOPIX 11:00〜11:25 の変化率（小数）
 
         Returns:
             フィルタ後 DataFrame（空の場合はその日全見送り）
         """
-        if scores_df.empty:
-            return scores_df.copy()
+        if features_df.empty:
+            return features_df.copy()
 
         # 1. TOPIX 地合いフィルタ
         if abs(topix_return) * 100.0 > self.max_topix_move_pct:
@@ -350,65 +364,115 @@ class PairMeanReversionEngine:
             )
             return pd.DataFrame()
 
-        result = scores_df.copy()
+        # 2. TOPIX 終盤急変フィルタ
+        if abs(topix_late_move) * 100.0 > self.max_topix_late_move_pct:
+            logger.info(
+                f"TOPIX 終盤急変フィルタ発動: {topix_late_move * 100:.2f}%"
+                f" > ±{self.max_topix_late_move_pct}% → 本日全見送り"
+            )
+            return pd.DataFrame()
 
-        # 2. 流動性フィルタ
+        result = features_df.copy()
+
+        # 3. 流動性フィルタ
         n_before = len(result)
         result = result[result["morning_turnover"] >= self.min_morning_turnover]
         logger.debug(f"流動性フィルタ: {n_before} → {len(result)} 銘柄")
 
-        # 3. 値動き異常フィルタ
+        # 4. 値動き異常フィルタ
         n_before = len(result)
         result = result[result["daily_return"].abs() * 100.0 <= self.max_daily_return_pct]
         logger.debug(f"騰落率フィルタ: {n_before} → {len(result)} 銘柄")
 
-        # 4. 後半モメンタム異常フィルタ
+        # 5. 後半モメンタム異常フィルタ
         n_before = len(result)
         result = result[
             result["late_morning_momentum"].abs() * 100.0 <= self.max_late_momentum_pct
         ]
         logger.debug(f"モメンタムフィルタ: {n_before} → {len(result)} 銘柄")
 
-        # 5. スコア閾値フィルタ
+        # 6. 出来高急増フィルタ（材料株の可能性が高い）
         n_before = len(result)
-        result = result[result["score"].abs() >= self.min_abs_score_threshold]
-        logger.debug(f"スコア閾値フィルタ: {n_before} → {len(result)} 銘柄")
+        result = result[result["volume_ratio"] <= self.max_volume_ratio]
+        logger.debug(f"出来高急増フィルタ: {n_before} → {len(result)} 銘柄")
 
         return result
 
-    def select_pairs(
+    def select_candidates(
         self,
         filtered_df: pd.DataFrame,
-    ) -> tuple[list[str], list[str]]:
-        """セクター偏り制御付きでロング・ショートの銘柄を選定する。
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """entry_thresholds による明示的エントリー条件フィルタで候補を選定する。
 
-        選定ロジック:
-            - score 上位（正値）→ ショート候補（過熱）
-            - score 下位（負値）→ ロング候補（過冷え）
-            - 各サイドで同一セクターは max_same_sector_per_side 件まで
+        ロング条件（全て満たす銘柄）:
+            - daily_return      < long_daily_return_max  (前日比 -1.0% 以下)
+            - relative_return   < long_relative_return_max (TOPIX 比 -0.7% 以下)
+            - late_morning_momentum < long_late_momentum_max (後半 -0.3% 以下)
+            - volume_ratio      >= min_volume_ratio (20 日平均の 0.5 倍以上)
+
+        ショート条件（全て満たす銘柄）:
+            - daily_return      > short_daily_return_min  (前日比 +1.0% 以上)
+            - relative_return   > short_relative_return_min (TOPIX 比 +0.7% 以上)
+            - late_morning_momentum > short_late_momentum_min (後半 +0.3% 以上)
+            - volume_ratio      >= min_volume_ratio (20 日平均の 0.5 倍以上)
 
         Args:
             filtered_df: apply_filters() の出力 DataFrame
 
         Returns:
-            (long_tickers, short_tickers) のタプル
+            (long_pool, short_pool) のタプル（どちらも空の場合あり）
         """
         if filtered_df.empty:
-            return [], []
+            return pd.DataFrame(), pd.DataFrame()
 
-        sorted_desc = filtered_df.sort_values("score", ascending=False)
-
-        # ショート候補: score > 0（過熱）
-        short_pool = sorted_desc[sorted_desc["score"] > 0]
-        # ロング候補: score < 0（過冷え）、score の小さい順
-        long_pool = sorted_desc[sorted_desc["score"] < 0].sort_values(
-            "score", ascending=True
+        long_mask = (
+            (filtered_df["daily_return"] < self.long_daily_return_max)
+            & (filtered_df["relative_return"] < self.long_relative_return_max)
+            & (filtered_df["late_morning_momentum"] < self.long_late_momentum_max)
+            & (filtered_df["volume_ratio"] >= self.min_volume_ratio)
+        )
+        short_mask = (
+            (filtered_df["daily_return"] > self.short_daily_return_min)
+            & (filtered_df["relative_return"] > self.short_relative_return_min)
+            & (filtered_df["late_morning_momentum"] > self.short_late_momentum_min)
+            & (filtered_df["volume_ratio"] >= self.min_volume_ratio)
         )
 
-        def _select(pool: pd.DataFrame, n: int) -> list[str]:
+        long_pool = filtered_df[long_mask]
+        short_pool = filtered_df[short_mask]
+
+        logger.debug(
+            f"候補選定: ロング={len(long_pool)}銘柄  ショート={len(short_pool)}銘柄"
+        )
+        return long_pool, short_pool
+
+    def select_pairs(
+        self,
+        long_pool: pd.DataFrame,
+        short_pool: pd.DataFrame,
+    ) -> tuple[list[str], list[str]]:
+        """セクター偏り制御付きでロング・ショートの銘柄を最終選定する。
+
+        選定ロジック:
+            - ロング候補を score 昇順（最も過冷え）で並べ、最大 max_positions_per_side 銘柄
+            - ショート候補を score 降順（最も過熱）で並べ、最大 max_positions_per_side 銘柄
+            - 各サイドで同一セクターは max_same_sector_per_side 件まで
+            - ペアである必要はない。ロングのみ / ショートのみも可。
+
+        Args:
+            long_pool:  select_candidates() + calc_scores() 後のロング候補 DataFrame
+            short_pool: select_candidates() + calc_scores() 後のショート候補 DataFrame
+
+        Returns:
+            (long_tickers, short_tickers) のタプル
+        """
+        def _select(pool: pd.DataFrame, ascending: bool, n: int) -> list[str]:
+            if pool.empty:
+                return []
+            sorted_pool = pool.sort_values("score", ascending=ascending)
             selected: list[str] = []
             sector_count: dict[str, int] = {}
-            for ticker, row in pool.iterrows():
+            for ticker, row in sorted_pool.iterrows():
                 if len(selected) >= n:
                     break
                 sector = str(row.get("sector", "unknown"))
@@ -417,8 +481,8 @@ class PairMeanReversionEngine:
                     sector_count[sector] = sector_count.get(sector, 0) + 1
             return selected
 
-        short_tickers = _select(short_pool, self.max_positions_per_side)
-        long_tickers = _select(long_pool, self.max_positions_per_side)
+        long_tickers = _select(long_pool, ascending=True, n=self.max_positions_per_side)
+        short_tickers = _select(short_pool, ascending=False, n=self.max_positions_per_side)
 
         return long_tickers, short_tickers
 
@@ -432,8 +496,9 @@ class PairMeanReversionEngine:
         """1 日分のシグナルを生成するラッパーメソッド。
 
         処理フロー:
-            1. TOPIX 前場リターンを計算
-            2. calc_features → calc_scores → apply_filters → select_pairs
+            1. TOPIX 前場リターン・終盤変化率を計算
+            2. calc_features → apply_filters → select_candidates →
+               calc_scores → スコア閾値フィルタ → select_pairs
 
         Args:
             morning_data_dict: 銘柄→前場 5 分足 DataFrame の辞書
@@ -444,8 +509,9 @@ class PairMeanReversionEngine:
         Returns:
             (long_tickers, short_tickers) または None（シグナルなし）
         """
-        # TOPIX 前場リターンを計算
+        # TOPIX 前場リターンと終盤変化率を計算
         topix_return = 0.0
+        topix_late_move = 0.0
         if topix_data is not None and not topix_data.empty:
             topix_close_1125 = self._get_price_at(topix_data, 11, 25)
             topix_prev = prev_close_dict.get("1306.T")
@@ -457,8 +523,23 @@ class PairMeanReversionEngine:
                 close_p = float(topix_data["close"].iloc[-1])
                 if open_p > 0:
                     topix_return = (close_p - open_p) / open_p
+                topix_close_1125 = close_p if topix_close_1125 is None else topix_close_1125
 
-        logger.debug(f"TOPIX 前場リターン: {topix_return * 100:.2f}%")
+            # TOPIX 終盤変化（11:00〜11:25）
+            topix_close_1100 = self._get_price_at(topix_data, 11, 0)
+            if topix_close_1100 is None or topix_close_1100 <= 0:
+                topix_close_1100 = self._get_price_at(topix_data, 10, 55)
+            if (
+                topix_close_1125 is not None
+                and topix_close_1100 is not None
+                and topix_close_1100 > 0
+            ):
+                topix_late_move = (topix_close_1125 - topix_close_1100) / topix_close_1100
+
+        logger.debug(
+            f"TOPIX 前場リターン: {topix_return * 100:.2f}%"
+            f"  終盤変化: {topix_late_move * 100:.2f}%"
+        )
 
         # 特徴量計算
         features_df = self.calc_features(
@@ -468,17 +549,34 @@ class PairMeanReversionEngine:
             logger.debug("特徴量が空: 対象銘柄なし")
             return None
 
-        # スコア計算
-        scores_df = self.calc_scores(features_df)
-
-        # フィルタ適用
-        filtered_df = self.apply_filters(scores_df, features_df, topix_return)
+        # フィルタ適用（地合い・流動性・値動き異常・出来高急増）
+        filtered_df = self.apply_filters(features_df, topix_return, topix_late_move)
         if filtered_df.empty:
             logger.debug("全銘柄フィルタアウト")
             return None
 
-        # ペア選定
-        long_tickers, short_tickers = self.select_pairs(filtered_df)
+        # 候補選定（entry_thresholds による明示的フィルタ）
+        long_pool, short_pool = self.select_candidates(filtered_df)
+        if long_pool.empty and short_pool.empty:
+            logger.debug("候補銘柄なし（エントリー閾値）")
+            return None
+
+        # スコア計算（候補内でのランキング用）
+        combined = pd.concat([long_pool, short_pool]).drop_duplicates()
+        scored = self.calc_scores(combined)
+
+        # スコア閾値フィルタ
+        scored = scored[scored["score"].abs() >= self.min_abs_score_threshold]
+        if scored.empty:
+            logger.debug("スコア閾値フィルタで全銘柄除外")
+            return None
+
+        # スコア後のロング/ショートプールを再構築
+        long_scored = scored[scored.index.isin(long_pool.index)]
+        short_scored = scored[scored.index.isin(short_pool.index)]
+
+        # 最終選定（セクター偏り制御付き）
+        long_tickers, short_tickers = self.select_pairs(long_scored, short_scored)
 
         if not long_tickers and not short_tickers:
             logger.debug("選定銘柄なし（スコア・セクター制約）")
@@ -486,6 +584,6 @@ class PairMeanReversionEngine:
 
         logger.debug(
             f"選定 → LONG={long_tickers}, SHORT={short_tickers}"
-            f" | 通過銘柄数={len(filtered_df)}"
+            f" | ロング候補={len(long_pool)}, ショート候補={len(short_pool)}"
         )
         return long_tickers, short_tickers
