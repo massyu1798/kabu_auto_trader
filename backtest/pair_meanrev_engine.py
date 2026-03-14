@@ -1,5 +1,5 @@
 """
-ペア平均回帰戦略専用バックテストエンジン
+ペアモメンタム継続戦略専用バックテストエンジン
 
 エントリー: 11:30 前場引け（11:25 バー close + スリッページ）
 エグジット:
@@ -76,7 +76,7 @@ class PairBacktestResult:
 
 
 class PairMeanRevBacktestEngine:
-    """ペア平均回帰戦略専用バックテストエンジン。
+    """ペアモメンタム継続戦略専用バックテストエンジン。
 
     使用方法:
         engine = PairMeanRevBacktestEngine("config/pair_meanrev_config.yaml")
@@ -499,7 +499,7 @@ class PairMeanRevBacktestEngine:
                     size=size,
                     pnl=pnl,
                     pnl_pct=pnl_pct,
-                    entry_reason=f"{side.value} score-based",
+                    entry_reason=f"{side.value} momentum-based",
                     exit_reason=exit_reason,
                     sector=sector,
                     trade_date=date_str,
@@ -656,7 +656,7 @@ class PairMeanRevBacktestEngine:
 
         report = f"""
 ============================================================
-        ペア平均回帰戦略 バックテストレポート
+        ペアモメンタム継続戦略 バックテストレポート
 ============================================================
 
 ■ 概要
