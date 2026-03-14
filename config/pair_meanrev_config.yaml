@@ -20,15 +20,15 @@ scoring:
     late_morning_momentum: 0.20
     vwap_deviation: 0.15
     volume_ratio: 0.10
-  min_abs_score_threshold: 0.3     # 0.5→0.3に下げる（閾値フィルタが別途あるため）
+  min_abs_score_threshold: 0.3     # 順張りでエントリー機会を増やすため低め設定（逆張り時0.5から引き下げ）
 
 entry_thresholds:
-  long_daily_return_max: -0.01     # 前日比-1.0%以下
-  long_relative_return_max: -0.007 # TOPIX比-0.7%以下
-  long_late_momentum_max: -0.003   # 後半-0.3%以下
-  short_daily_return_min: 0.01     # 前日比+1.0%以上
-  short_relative_return_min: 0.007 # TOPIX比+0.7%以上
-  short_late_momentum_min: 0.003   # 後半+0.3%以上
+  long_daily_return_min: 0.01      # 前日比+1.0%以上（上昇モメンタム追随）
+  long_relative_return_min: 0.007  # TOPIX比+0.7%以上
+  long_late_momentum_min: 0.003    # 後半+0.3%以上
+  short_daily_return_max: -0.01    # 前日比-1.0%以下（下落継続売り）
+  short_relative_return_max: -0.007 # TOPIX比-0.7%以下
+  short_late_momentum_max: -0.003  # 後半-0.3%以下
   min_volume_ratio: 0.5            # 出来高が20日平均の0.5倍以上
 
 filters:
@@ -41,8 +41,8 @@ filters:
   max_same_sector_per_side: 1      # 同一セクター片側最大1
 
 exit:
-  stop_loss_pct: 0.008             # 0.6%→0.8%に拡大
-  take_profit_pct: 0.005           # 0.4%→0.5%に拡大
+  stop_loss_pct: 0.008             # ストップロス0.8%
+  take_profit_pct: 0.006           # 利確0.6%（順張りは利が伸びやすいため拡大）
   force_close_time: 1235           # 強制決済
 
 risk:

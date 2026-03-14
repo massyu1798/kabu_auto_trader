@@ -1,11 +1,11 @@
 """
-前場終了時相対過熱・過冷えスコアによる後場寄り平均回帰型ペア戦略
+前場終了時モメンタムスコアによる後場寄りモメンタム継続型ペア戦略
 シグナル生成エンジン
 
 戦略概要:
   - 11:25時点の前場5分足データから5種の特徴量を算出
   - 各特徴量をz-score標準化し重み付き合成スコアを計算
-  - スコア上位（過熱）銘柄をショート、下位（過冷え）銘柄をロング
+  - スコア上位（前場上昇モメンタム強）銘柄をロング、下位（前場下落継続）銘柄をショート
   - セクター偏り制御・流動性・値動き異常フィルタを適用
 """
 
@@ -61,7 +61,7 @@ UNIVERSE: dict[str, dict[str, str]] = {
 
 
 class PairMeanReversionEngine:
-    """前場終了時相対過熱・過冷えスコアによるペア選定エンジン
+    """前場終了時モメンタムスコアによるペア選定エンジン（モメンタム継続戦略）
 
     使用方法:
         engine = PairMeanReversionEngine("config/pair_meanrev_config.yaml")
@@ -99,12 +99,12 @@ class PairMeanReversionEngine:
         self.max_topix_late_move_pct: float = float(filt.get("max_topix_late_move_pct", 0.5))
 
         et = self.config.get("entry_thresholds", {})
-        self.long_daily_return_max: float = float(et.get("long_daily_return_max", -0.01))
-        self.long_relative_return_max: float = float(et.get("long_relative_return_max", -0.007))
-        self.long_late_momentum_max: float = float(et.get("long_late_momentum_max", -0.003))
-        self.short_daily_return_min: float = float(et.get("short_daily_return_min", 0.01))
-        self.short_relative_return_min: float = float(et.get("short_relative_return_min", 0.007))
-        self.short_late_momentum_min: float = float(et.get("short_late_momentum_min", 0.003))
+        self.long_daily_return_min: float = float(et.get("long_daily_return_min", 0.01))
+        self.long_relative_return_min: float = float(et.get("long_relative_return_min", 0.007))
+        self.long_late_momentum_min: float = float(et.get("long_late_momentum_min", 0.003))
+        self.short_daily_return_max: float = float(et.get("short_daily_return_max", -0.01))
+        self.short_relative_return_max: float = float(et.get("short_relative_return_max", -0.007))
+        self.short_late_momentum_max: float = float(et.get("short_late_momentum_max", -0.003))
         self.min_volume_ratio: float = float(et.get("min_volume_ratio", 0.5))
 
     # ------------------------------------------------------------------
@@ -271,7 +271,7 @@ class PairMeanReversionEngine:
     def calc_scores(self, features_df: pd.DataFrame) -> pd.DataFrame:
         """z-score 標準化 → 重み付き合成スコアを計算する。
 
-        スコアが高いほど過熱（ショート候補）、低いほど過冷え（ロング候補）。
+        スコアが高いほど上昇モメンタム強（ロング候補）、低いほど下落継続（ショート候補）。
 
         Args:
             features_df: calc_features() の出力 DataFrame
@@ -404,16 +404,16 @@ class PairMeanReversionEngine:
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """entry_thresholds による明示的エントリー条件フィルタで候補を選定する。
 
-        ロング条件（全て満たす銘柄）:
-            - daily_return      < long_daily_return_max  (前日比 -1.0% 以下)
-            - relative_return   < long_relative_return_max (TOPIX 比 -0.7% 以下)
-            - late_morning_momentum < long_late_momentum_max (後半 -0.3% 以下)
+        ロング条件（全て満たす銘柄）＝上昇モメンタム追随:
+            - daily_return      > long_daily_return_min  (前日比 +1.0% 以上)
+            - relative_return   > long_relative_return_min (TOPIX 比 +0.7% 以上)
+            - late_morning_momentum > long_late_momentum_min (後半 +0.3% 以上)
             - volume_ratio      >= min_volume_ratio (20 日平均の 0.5 倍以上)
 
-        ショート条件（全て満たす銘柄）:
-            - daily_return      > short_daily_return_min  (前日比 +1.0% 以上)
-            - relative_return   > short_relative_return_min (TOPIX 比 +0.7% 以上)
-            - late_morning_momentum > short_late_momentum_min (後半 +0.3% 以上)
+        ショート条件（全て満たす銘柄）＝下落継続売り:
+            - daily_return      < short_daily_return_max  (前日比 -1.0% 以下)
+            - relative_return   < short_relative_return_max (TOPIX 比 -0.7% 以下)
+            - late_morning_momentum < short_late_momentum_max (後半 -0.3% 以下)
             - volume_ratio      >= min_volume_ratio (20 日平均の 0.5 倍以上)
 
         Args:
@@ -426,22 +426,22 @@ class PairMeanReversionEngine:
             return pd.DataFrame(), pd.DataFrame()
 
         long_mask = (
-            (filtered_df["daily_return"] < self.long_daily_return_max)
-            & (filtered_df["relative_return"] < self.long_relative_return_max)
-            & (filtered_df["late_morning_momentum"] < self.long_late_momentum_max)
+            (filtered_df["daily_return"] > self.long_daily_return_min)
+            & (filtered_df["relative_return"] > self.long_relative_return_min)
+            & (filtered_df["late_morning_momentum"] > self.long_late_momentum_min)
             & (filtered_df["volume_ratio"] >= self.min_volume_ratio)
         )
         short_mask = (
-            (filtered_df["daily_return"] > self.short_daily_return_min)
-            & (filtered_df["relative_return"] > self.short_relative_return_min)
-            & (filtered_df["late_morning_momentum"] > self.short_late_momentum_min)
+            (filtered_df["daily_return"] < self.short_daily_return_max)
+            & (filtered_df["relative_return"] < self.short_relative_return_max)
+            & (filtered_df["late_morning_momentum"] < self.short_late_momentum_max)
             & (filtered_df["volume_ratio"] >= self.min_volume_ratio)
         )
 
         long_pool = filtered_df[long_mask]
         short_pool = filtered_df[short_mask]
 
-        # long_mask と short_mask は排他的（daily_return < -1% と > +1% は同時不成立）
+        # long_mask と short_mask は排他的（daily_return > +1% と < -1% は同時不成立）
         # 万が一両側に入った銘柄はいずれかのプールにのみ存在する
         logger.debug(
             f"候補選定: ロング={len(long_pool)}銘柄  ショート={len(short_pool)}銘柄"
@@ -455,9 +455,9 @@ class PairMeanReversionEngine:
     ) -> tuple[list[str], list[str]]:
         """セクター偏り制御付きでロング・ショートの銘柄を最終選定する。
 
-        選定ロジック:
-            - ロング候補を score 昇順（最も過冷え）で並べ、最大 max_positions_per_side 銘柄
-            - ショート候補を score 降順（最も過熱）で並べ、最大 max_positions_per_side 銘柄
+        選定ロジック（モメンタム継続）:
+            - ロング候補を score 降順（最も上昇モメンタムが強い）で並べ、最大 max_positions_per_side 銘柄
+            - ショート候補を score 昇順（最も下落モメンタムが強い）で並べ、最大 max_positions_per_side 銘柄
             - 各サイドで同一セクターは max_same_sector_per_side 件まで
             - ペアである必要はない。ロングのみ / ショートのみも可。
 
@@ -483,8 +483,8 @@ class PairMeanReversionEngine:
                     sector_count[sector] = sector_count.get(sector, 0) + 1
             return selected
 
-        long_tickers = _select(long_pool, score_ascending=True, n=self.max_positions_per_side)
-        short_tickers = _select(short_pool, score_ascending=False, n=self.max_positions_per_side)
+        long_tickers = _select(long_pool, score_ascending=False, n=self.max_positions_per_side)
+        short_tickers = _select(short_pool, score_ascending=True, n=self.max_positions_per_side)
 
         return long_tickers, short_tickers
 

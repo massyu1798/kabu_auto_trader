@@ -1,5 +1,5 @@
 """
-バックテスト実行スクリプト: ペア平均回帰戦略
+バックテスト実行スクリプト: ペアモメンタム継続戦略
 
 実行方法:
     python main_backtest_pair_meanrev.py [--mode immediate|delayed] [--output <dir>]
@@ -299,7 +299,7 @@ def save_daily_pnl_csv(result: PairBacktestResult, save_path: str) -> None:
 def parse_args() -> argparse.Namespace:
     """コマンドライン引数を解析する。"""
     parser = argparse.ArgumentParser(
-        description="ペア平均回帰戦略バックテスト"
+        description="ペアモメンタム継続戦略バックテスト"
     )
     parser.add_argument(
         "--mode",
@@ -335,8 +335,8 @@ def main() -> None:
     os.makedirs(args.output, exist_ok=True)
 
     print("\n" + "=" * 60)
-    print("  ペア平均回帰戦略 バックテスト")
-    print("  (前場終了時相対過熱・過冷えスコア → 後場寄り平均回帰)")
+    print("  ペアモメンタム継続戦略 バックテスト")
+    print("  (前場終了時モメンタムスコア → 後場寄りモメンタム継続)")
     print("=" * 60)
 
     # ------------------------------------------------------------------
