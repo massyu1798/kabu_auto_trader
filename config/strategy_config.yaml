@@ -101,10 +101,10 @@ strategies:
     enabled: true                    # バックテスト用独立ループで使用
     weight: 1.0
     params:
-      ibs_oversold: 0.3              # 緩和: 0.2 → 0.3（overnight_config.yamlで上書き可）
-      rsi2_oversold: 15              # 緩和: 10 → 15（overnight_config.yamlで上書き可）
-      min_daily_drop_pct: -1.0       # 緩和: -1.5% → -1.0%（overnight_config.yamlで上書き可）
-      signal_score_threshold: 0.9    # 緩和: 1.1 → 0.9（IBS+RSI2の2条件でも発動可能）
+      ibs_oversold: 0.2              # 依頼仕様: IBS < 0.2
+      rsi2_oversold: 10              # 依頼仕様: RSI(2) < 10
+      min_daily_drop_pct: -1.5       # 依頼仕様: 当日下落率 -1.5%以上
+      signal_score_threshold: 1.1    # 3条件すべてANDで発動: 0.5+0.4+0.3=1.2
       skip_fomc_boj: true            # 日銀/FOMC当日除外
 
 ensemble:

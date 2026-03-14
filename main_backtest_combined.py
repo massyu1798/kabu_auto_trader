@@ -60,9 +60,16 @@ def _normalize_ts(ts) -> pd.Timestamp:
     return ts.tz_convert(_JST)
 
 
-# ユニバース: ONG専用（日経225 ETF, TOPIX ETF + 既存STOCK_POOLから上位20銘柄）
-ONG_ETF_TICKERS = ["1321.T", "1306.T"]
-ONG_STOCK_TICKERS = STOCK_POOL[:20]  # 時価総額上位20銘柄相当
+# ユニバース: ONG専用（添付画像の銘柄リスト + 日経225 ETF for 夜間追い風近似）
+ONG_ETF_TICKERS = ["1321.T"]  # 日経225 ETF（夜間追い風近似用のみ）
+ONG_STOCK_TICKERS = [
+    "9984.T", "8306.T", "5401.T", "7203.T", "6758.T", "6501.T",
+    "8316.T", "6762.T", "6857.T", "6981.T", "7267.T", "6702.T",
+    "8058.T", "4063.T", "6752.T", "6098.T", "7974.T", "6503.T",
+    "4307.T", "8801.T", "6954.T", "6902.T", "4568.T", "3382.T",
+    "9433.T", "8766.T", "8035.T", "4661.T", "3659.T", "4502.T",
+    "2914.T", "4519.T", "7751.T", "9022.T", "7741.T", "6367.T",
+]
 ONG_UNIVERSE = ONG_ETF_TICKERS + ONG_STOCK_TICKERS
 
 
