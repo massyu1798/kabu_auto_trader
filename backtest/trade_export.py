@@ -8,6 +8,8 @@ Responsibilities:
 - Print latest-day summary to console
 """
 
+import os
+import datetime
 import pandas as pd
 from typing import Any
 
@@ -229,28 +231,65 @@ def get_latest_day_summary(df: pd.DataFrame) -> dict:
 # 5. Export utilities
 # ============================================================
 
+def _fallback_path(path: str) -> str:
+    """Generate a timestamped fallback path when the original file is locked."""
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base, ext = os.path.splitext(path)
+    return f"{base}_{ts}{ext}"
+
+
+def _warn_permission_error(original: str, fallback: str) -> None:
+    """Print a user-friendly message when a file is locked and a fallback is used."""
+    print(f"  ⚠️ PermissionError: '{original}' が開かれています。代替ファイルに出力します: {fallback}")
+
+
 def export_trades_csv(df: pd.DataFrame, path: str) -> None:
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"  -> Trade detail exported: {path} ({len(df)} rows)")
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        print(f"  -> Trade detail exported: {path} ({len(df)} rows)")
+    except PermissionError:
+        alt = _fallback_path(path)
+        _warn_permission_error(path, alt)
+        df.to_csv(alt, index=False, encoding="utf-8-sig")
+        print(f"  -> Trade detail exported: {alt} ({len(df)} rows)")
 
 
 def export_trades_json(df: pd.DataFrame, path: str) -> None:
-    df.to_json(path, orient="records", force_ascii=False, indent=2,
-               date_format="iso")
-    print(f"  -> Trade detail exported: {path} ({len(df)} rows)")
+    try:
+        df.to_json(path, orient="records", force_ascii=False, indent=2,
+                   date_format="iso")
+        print(f"  -> Trade detail exported: {path} ({len(df)} rows)")
+    except PermissionError:
+        alt = _fallback_path(path)
+        _warn_permission_error(path, alt)
+        df.to_json(alt, orient="records", force_ascii=False, indent=2,
+                   date_format="iso")
+        print(f"  -> Trade detail exported: {alt} ({len(df)} rows)")
 
 
 def export_daily_csv(daily_df: pd.DataFrame, path: str) -> None:
-    daily_df.to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"  -> Daily PnL exported: {path} ({len(daily_df)} days)")
+    try:
+        daily_df.to_csv(path, index=False, encoding="utf-8-sig")
+        print(f"  -> Daily PnL exported: {path} ({len(daily_df)} days)")
+    except PermissionError:
+        alt = _fallback_path(path)
+        _warn_permission_error(path, alt)
+        daily_df.to_csv(alt, index=False, encoding="utf-8-sig")
+        print(f"  -> Daily PnL exported: {alt} ({len(daily_df)} days)")
 
 
 def export_daily_json(daily_df: pd.DataFrame, path: str) -> None:
     # Convert date to string for JSON
     out = daily_df.copy()
     out["day"] = out["day"].astype(str)
-    out.to_json(path, orient="records", force_ascii=False, indent=2)
-    print(f"  -> Daily PnL exported: {path} ({len(daily_df)} days)")
+    try:
+        out.to_json(path, orient="records", force_ascii=False, indent=2)
+        print(f"  -> Daily PnL exported: {path} ({len(daily_df)} days)")
+    except PermissionError:
+        alt = _fallback_path(path)
+        _warn_permission_error(path, alt)
+        out.to_json(alt, orient="records", force_ascii=False, indent=2)
+        print(f"  -> Daily PnL exported: {alt} ({len(daily_df)} days)")
 
 
 # ============================================================

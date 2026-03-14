@@ -1,12 +1,12 @@
 # ============================================
 # Strategy Config v20: 独立判定型 + 閾値適正化 (Leverage 3x)
-# 保証金約333万 × レバレッジ3倍 = 建玉上限 1000万円
-# MR 50%(500万) / BO 30%(300万) / ONG 20%(200万)
+# 保証金約233万 × レバレッジ3倍 = 建玉上限 700万円（AM/PM用）
+# MR 50%(350万) / BO 30%(210万) / ONG 20%(140万→overnight_config.yamlで200万に上書き)
 # ============================================
 
 global:
-  initial_capital: 10000000          # 1000万円（信用建玉上限）
-  margin_capital: 3333333            # 保証金（実質資金）
+  initial_capital: 7000000           # 700万円（AM/PM用建玉上限）
+  margin_capital: 2333333            # 保証金（実質資金）
   leverage: 3.0                      # レバレッジ倍率
   max_positions: 3                   # 5→3: 同時保有数を絞り1トレードの質を重視
   combined_max_positions: 3
@@ -135,6 +135,6 @@ regime:
   defense_size_ratio: 0.25           # 防御時ポジション縮小率
 
 live_risk_caps:
-  max_notional_per_position: 1500000 # 1ポジション最大150万円
-  max_total_exposure: 10000000       # 総エクスポージャー1000万円
+  max_notional_per_position: 1050000 # 1ポジション最大105万円（700万×15%）
+  max_total_exposure: 7000000        # 総エクスポージャー700万円
   safety_margin_ratio: 0.95

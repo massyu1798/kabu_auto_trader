@@ -363,13 +363,14 @@ def main():
 
     # === レポート出力 ===
     if not args.no_summary:
+        ong_capital = getattr(ong_engine, "ong_capital", initial_capital * 0.20)
         report = f"""
 ============================================================
   統合バックテストレポート v21
 ============================================================
 
 ■ 総合成績（全戦略合算）
-  初期資金:       {initial_capital:>14,.0f} 円
+  初期資金:       {initial_capital:>14,.0f} 円 (AM/PM) + {ong_capital:>,.0f} 円 (ONG)
   最終資産:       {equity_final:>14,.0f} 円
   純損益:         {total_pnl:>+14,.0f} 円 ({total_return:+.2f}%)
   総トレード数:   {len(all_trades)}
@@ -380,7 +381,7 @@ def main():
 ■ 戦略別成績
 {format_strategy_section("[1] 午前 v12.4 モーニング・モメンタム（MR+BO）", morning_result.trades, initial_capital, morning_result.equity_curve)}
 {format_strategy_section("[2] 午後 v1.2 アフタヌーン・リバーサル", afternoon_result.trades, initial_capital, afternoon_result.equity_curve)}
-{format_strategy_section("[3] オーバーナイト・ギャップ", ong_result.trades, initial_capital, ong_result.equity_curve)}
+{format_strategy_section("[3] オーバーナイト・ギャップ", ong_result.trades, ong_capital, ong_result.equity_curve)}
 """
         print(report)
 
