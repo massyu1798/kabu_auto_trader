@@ -97,6 +97,12 @@ class PairMeanReversionEngine:
         self.max_same_sector_per_side: int = int(filt["max_same_sector_per_side"])
         self.max_volume_ratio: float = float(filt.get("max_volume_ratio", 5.0))
         self.max_topix_late_move_pct: float = float(filt.get("max_topix_late_move_pct", 0.5))
+        # 新規フィルタパラメータ
+        self.volume_ratio_exclude_threshold: float = float(
+            filt.get("volume_ratio_exclude_threshold", 5.0)
+        )
+        self.max_gap_pct: float = float(filt.get("max_gap_pct", 3.0))
+        self.max_same_sector_total: int = int(filt.get("max_same_sector_total", 2))
 
         et = self.config.get("entry_thresholds", {})
         self.long_daily_return_min: float = float(et.get("long_daily_return_min", 0.01))
@@ -216,6 +222,12 @@ class PairMeanReversionEngine:
                 # フォールバック: 当日の最初のバー close
                 close_1100 = float(df["close"].iloc[0])
 
+            # 当日始値（寄付き価格）：ギャップフィルタ用
+            open_price = float(df["open"].iloc[0])
+
+            # 寄付きギャップ（当日始値 - 前日終値）/ 前日終値
+            gap_pct = (open_price - prev_close) / prev_close if prev_close > 0 else 0.0
+
             # 1. 当日騰落率
             daily_return = (close_1125 - prev_close) / prev_close
 
@@ -253,6 +265,8 @@ class PairMeanReversionEngine:
                     "sector": info["sector"],
                     "close_1125": close_1125,
                     "prev_close": prev_close,
+                    "open_price": open_price,
+                    "gap_pct": gap_pct,
                     "daily_return": daily_return,
                     "relative_return": relative_return,
                     "late_morning_momentum": late_morning_momentum,
@@ -340,7 +354,8 @@ class PairMeanReversionEngine:
             3. 流動性フィルタ（前場売買代金 ≥ 30 億円）
             4. 値動き異常フィルタ（|当日騰落率| > 5%）
             5. 後半モメンタム異常フィルタ（|後半 momentum| > 3%）
-            6. 出来高急増フィルタ（出来高倍率 > max_volume_ratio）
+            6. 出来高急増フィルタ（出来高倍率 > volume_ratio_exclude_threshold）
+            7. ギャップフィルタ（|寄付きギャップ| > max_gap_pct%）
 
         Note:
             スコア閾値フィルタは select_candidates → calc_scores 後に適用する。
@@ -391,10 +406,18 @@ class PairMeanReversionEngine:
         ]
         logger.debug(f"モメンタムフィルタ: {n_before} → {len(result)} 銘柄")
 
-        # 6. 出来高急増フィルタ（材料株の可能性が高い）
+        # 6. 出来高急増フィルタ（材料株除外: 決算・IR等の代理指標）
         n_before = len(result)
-        result = result[result["volume_ratio"] <= self.max_volume_ratio]
+        result = result[result["volume_ratio"] <= self.volume_ratio_exclude_threshold]
         logger.debug(f"出来高急増フィルタ: {n_before} → {len(result)} 銘柄")
+
+        # 7. ギャップフィルタ（寄付きからのギャップが大きすぎる銘柄を除外）
+        if "gap_pct" in result.columns:
+            n_before = len(result)
+            result = result[result["gap_pct"].abs() * 100.0 <= self.max_gap_pct]
+            n_removed = n_before - len(result)
+            if n_removed > 0:
+                logger.debug(f"ギャップフィルタ: {n_before} → {len(result)} 銘柄 ({n_removed}銘柄除外)")
 
         return result
 
@@ -459,6 +482,7 @@ class PairMeanReversionEngine:
             - ロング候補を score 降順（最も上昇モメンタムが強い）で並べ、最大 max_positions_per_side 銘柄
             - ショート候補を score 昇順（最も下落モメンタムが強い）で並べ、最大 max_positions_per_side 銘柄
             - 各サイドで同一セクターは max_same_sector_per_side 件まで
+            - ロング+ショート合計で同一セクターは max_same_sector_total 件まで
             - ペアである必要はない。ロングのみ / ショートのみも可。
 
         Args:
@@ -468,23 +492,70 @@ class PairMeanReversionEngine:
         Returns:
             (long_tickers, short_tickers) のタプル
         """
-        def _select(pool: pd.DataFrame, score_ascending: bool, n: int) -> list[str]:
+        def _select(
+            pool: pd.DataFrame,
+            score_ascending: bool,
+            n: int,
+            sector_count_ref: Optional[dict[str, int]] = None,
+        ) -> list[str]:
+            """セクター偏り制御付きで銘柄を選定する内部ヘルパー。
+
+            Args:
+                pool:             候補 DataFrame
+                score_ascending:  True=スコア昇順（ショート）、False=降順（ロング）
+                n:                選定最大数
+                sector_count_ref: 既に選定済みのセクター集計（合計制約用）
+
+            Returns:
+                選定された ticker のリスト
+            """
             if pool.empty:
                 return []
             sorted_pool = pool.sort_values("score", ascending=score_ascending)
             selected: list[str] = []
             sector_count: dict[str, int] = {}
+            # ロング側のセクター集計をコピーして、ショート選定中の合計カウンタとして使用する
+            combined_count: dict[str, int] = dict(sector_count_ref) if sector_count_ref else {}
             for ticker, row in sorted_pool.iterrows():
                 if len(selected) >= n:
                     break
                 sector = str(row.get("sector", "unknown"))
-                if sector_count.get(sector, 0) < self.max_same_sector_per_side:
-                    selected.append(str(ticker))
-                    sector_count[sector] = sector_count.get(sector, 0) + 1
+                # 片側制約チェック
+                if sector_count.get(sector, 0) >= self.max_same_sector_per_side:
+                    continue
+                # 合計制約チェック（ロング+ショート合算）
+                if combined_count.get(sector, 0) >= self.max_same_sector_total:
+                    logger.debug(
+                        f"{ticker}({sector}): セクター合計上限 "
+                        f"{self.max_same_sector_total} に到達 → スキップ"
+                    )
+                    continue
+                selected.append(str(ticker))
+                sector_count[sector] = sector_count.get(sector, 0) + 1
+                combined_count[sector] = combined_count.get(sector, 0) + 1
             return selected
 
-        long_tickers = _select(long_pool, score_ascending=False, n=self.max_positions_per_side)
-        short_tickers = _select(short_pool, score_ascending=True, n=self.max_positions_per_side)
+        # まずロングを選定し、そのセクター集計をショート選定に引き継ぐ
+        long_sector_count: dict[str, int] = {}
+        long_tickers: list[str] = []
+        if not long_pool.empty:
+            sorted_long = long_pool.sort_values("score", ascending=False)
+            for ticker, row in sorted_long.iterrows():
+                if len(long_tickers) >= self.max_positions_per_side:
+                    break
+                sector = str(row.get("sector", "unknown"))
+                if long_sector_count.get(sector, 0) >= self.max_same_sector_per_side:
+                    continue
+                long_tickers.append(str(ticker))
+                long_sector_count[sector] = long_sector_count.get(sector, 0) + 1
+
+        # ショート選定時にロング側のセクター集計を考慮
+        short_tickers = _select(
+            short_pool,
+            score_ascending=True,
+            n=self.max_positions_per_side,
+            sector_count_ref=long_sector_count,
+        )
 
         return long_tickers, short_tickers
 

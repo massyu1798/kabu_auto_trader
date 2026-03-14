@@ -39,6 +39,9 @@ filters:
   max_topix_move_pct: 2.0          # TOPIX前場±2%超で見送り
   max_topix_late_move_pct: 0.5     # TOPIX終盤(11:00-11:25)急変フィルタ
   max_same_sector_per_side: 1      # 同一セクター片側最大1
+  volume_ratio_exclude_threshold: 5.0  # 出来高倍率5倍以上で除外（決算・IR等の材料株代理）
+  max_gap_pct: 3.0                     # 寄付きギャップ±3%超で除外（値動き異常）
+  max_same_sector_total: 2             # ロング+ショート合計で同一セクター最大2
 
 exit:
   stop_loss_pct: 0.008             # ストップロス0.8%
@@ -47,3 +50,5 @@ exit:
 
 risk:
   max_daily_loss: 0.02             # 1.5%→2.0%に緩和
+  max_consecutive_losses: 5        # 連敗停止: 直近N回連続負けで翌日見送り
+  max_gross_exposure_pct: 1.0      # グロスエクスポージャ上限（初期資金の100%）

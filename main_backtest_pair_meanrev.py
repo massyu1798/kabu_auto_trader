@@ -3,6 +3,7 @@
 
 実行方法:
     python main_backtest_pair_meanrev.py [--mode immediate|delayed] [--output <dir>]
+    python main_backtest_pair_meanrev.py --compare   # immediate/delayed 両モード比較
 
 データ取得:
   - 5 分足: Yahoo Finance (period="60d")
@@ -14,6 +15,7 @@
   - <output>/pair_meanrev_equity.png  : equity curve PNG
   - <output>/pair_meanrev_trades.csv  : トレード一覧 CSV
   - <output>/pair_meanrev_daily_pnl.csv : 日別 PnL CSV
+  - <output>/pair_meanrev_compare.txt : 比較レポート (--compare 時)
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from backtest.pair_meanrev_engine import (
     PairBacktestResult,
     Side,
 )
+from backtest.pair_meanrev_reporter import generate_full_report, compare_reports
 from strategy.pair_mean_reversion import UNIVERSE
 
 # ---------------------------------------------------------------------------
@@ -308,6 +311,11 @@ def parse_args() -> argparse.Namespace:
         help="exit_mode の上書き（config より優先）",
     )
     parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="immediate / delayed 両モードで実行し、結果を並べて比較する",
+    )
+    parser.add_argument(
         "--output",
         default=".",
         help="出力ディレクトリ（デフォルト: カレントディレクトリ）",
@@ -354,6 +362,13 @@ def main() -> None:
         print("   TOPIX フィルタは無効化されます。")
 
     # ------------------------------------------------------------------
+    # 比較モード（--compare）
+    # ------------------------------------------------------------------
+    if args.compare:
+        _run_compare_mode(args, intraday_data, daily_data, topix_intraday, topix_daily)
+        return
+
+    # ------------------------------------------------------------------
     # エンジン初期化（exit_mode の上書きオプション対応）
     # ------------------------------------------------------------------
     engine = PairMeanRevBacktestEngine(args.config)
@@ -378,9 +393,10 @@ def main() -> None:
     result = engine.run(intraday_data, daily_data, topix_intraday, topix_daily)
 
     # ------------------------------------------------------------------
-    # レポート出力
+    # レポート出力（詳細版）
     # ------------------------------------------------------------------
-    print(engine.generate_report(result))
+    report_text = generate_full_report(result, engine.initial_capital, engine.exit_mode)
+    print(report_text)
 
     if not result.trades:
         print("トレードが発生しませんでした。設定・データを確認してください。")
@@ -401,6 +417,73 @@ def main() -> None:
     print(f"  エクイティカーブ: {eq_path}")
     print(f"  トレード一覧:     {trades_path}")
     print(f"  日別PnL:          {dpnl_path}")
+    print("\n完了\n")
+
+
+def _run_compare_mode(
+    args: argparse.Namespace,
+    intraday_data: dict,
+    daily_data: dict,
+    topix_intraday: "pd.DataFrame",
+    topix_daily: "pd.DataFrame",
+) -> None:
+    """immediate / delayed 両モードを実行して比較レポートを出力する。
+
+    Args:
+        args:            コマンドライン引数
+        intraday_data:   銘柄→5 分足 DataFrame の辞書
+        daily_data:      銘柄→日足 DataFrame の辞書
+        topix_intraday:  TOPIX ETF の 5 分足
+        topix_daily:     TOPIX ETF の日足
+    """
+    results = {}
+    for mode in ["immediate", "delayed"]:
+        print(f"\n{'=' * 60}")
+        print(f"  モード: {mode}")
+        print(f"{'=' * 60}\n")
+
+        engine = PairMeanRevBacktestEngine(args.config)
+        engine.exit_mode = mode
+        print(
+            f"■ バックテスト設定\n"
+            f"  初期資金:       {engine.initial_capital:>12,.0f} 円\n"
+            f"  exit_mode:      {engine.exit_mode}\n"
+            f"  SL:             {engine.stop_loss_pct * 100:.1f}%  "
+            f"TP: {engine.take_profit_pct * 100:.1f}%\n"
+            f"  risk_per_pos:   {engine.risk_per_position * 100:.0f}%\n"
+        )
+        print("■ バックテスト実行中 ...\n")
+        result = engine.run(intraday_data, daily_data, topix_intraday, topix_daily)
+        results[mode] = (engine, result)
+
+        # 個別レポート出力
+        print(generate_full_report(result, engine.initial_capital, mode))
+
+        if result.trades:
+            eq_path = os.path.join(args.output, f"pair_meanrev_equity_{mode}.png")
+            trades_path = os.path.join(args.output, f"pair_meanrev_trades_{mode}.csv")
+            dpnl_path = os.path.join(args.output, f"pair_meanrev_daily_pnl_{mode}.csv")
+            save_equity_curve(result, engine.initial_capital, eq_path)
+            save_trades_csv(result, trades_path)
+            save_daily_pnl_csv(result, dpnl_path)
+            print(f"  エクイティカーブ: {eq_path}")
+            print(f"  トレード一覧:     {trades_path}")
+            print(f"  日別PnL:          {dpnl_path}")
+
+    # 比較レポート
+    engine_imm, result_imm = results.get("immediate", (None, PairBacktestResult()))
+    engine_dly, result_dly = results.get("delayed", (None, PairBacktestResult()))
+    initial_capital = engine_imm.initial_capital if engine_imm else 5_000_000
+
+    compare_text = compare_reports(result_imm, result_dly, initial_capital)
+    print(compare_text)
+
+    # 比較レポートをファイルにも保存
+    compare_path = os.path.join(args.output, "pair_meanrev_compare.txt")
+    with open(compare_path, "w", encoding="utf-8") as f:
+        f.write(compare_text)
+    logger.info(f"比較レポート保存: {compare_path}")
+    print(f"\n■ 比較レポート: {compare_path}")
     print("\n完了\n")
 
 
