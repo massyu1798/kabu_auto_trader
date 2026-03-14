@@ -1,13 +1,14 @@
 """
-合体バックテスト: 午前 v12.4 + 午後リバーサル v1.2
+合体バックテスト: 午前 v12.4 + 午後リバーサル v1.2 + オーバーナイト・ギャップ v1.0
 - 午前（9:00-12:00）: モーニング・モメンタム順張り
 - 午後（12:30-14:00）: アフタヌーン・リバーサル逆張り
+- ONG（引け買い→翌寄り売り）: オーバーナイト・ギャップ戦略
 
 CLI Options:
   --last-days N        直近N営業日の日次レポート (default: 7)
   --export FILE        トレード明細をCSV/JSON出力 (拡張子で判定)
   --export-daily FILE  日次集計をCSV/JSON出力
-  --print-latest       最新日のAM/PM別損益をコンソール表示
+  --print-latest       最新日のAM/PM/ONG別損益をコンソール表示
   --no-summary         総合サマリ出力を抑制
 """
 
@@ -18,6 +19,7 @@ import yaml
 import pandas_ta as ta
 from backtest.engine import BacktestEngine
 from backtest.afternoon_engine import AfternoonBacktestEngine
+from backtest.overnight_engine import OvernightGapEngine
 from backtest.screener import screen_stocks
 from backtest.trade_export import (
     build_trades_df,
@@ -32,6 +34,7 @@ from backtest.trade_export import (
 )
 from strategy.ensemble import EnsembleEngine
 from strategy.afternoon_reversal import AfternoonReversalEngine
+from strategy.overnight_gap import generate_ong_signals
 
 
 def load_intraday(ticker):
@@ -166,7 +169,7 @@ def _detect_format(filepath: str) -> str:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="合体バックテスト: 午前 v12.4 + 午後リバーサル v1.2"
+        description="合体バックテスト: 午前 v12.4 + 午後リバーサル v1.2 + ONG v1.0"
     )
     parser.add_argument(
         "--last-days", type=int, default=7,
@@ -182,7 +185,7 @@ def parse_args():
     )
     parser.add_argument(
         "--print-latest", action="store_true",
-        help="最新日（データ上の最終日）のAM/PM別損益を表示"
+        help="最新日（データ上の最終日）のAM/PM/ONG別損益を表示"
     )
     parser.add_argument(
         "--no-summary", action="store_true",
@@ -195,7 +198,7 @@ def main():
     args = parse_args()
 
     print("=" * 60)
-    print("  午前v12.4 + 午後リバーサルv1.2 合体バックテスト")
+    print("  午前v12.4 + 午後リバーサルv1.2 + ONGv1.0 合体バックテスト")
     print("=" * 60)
 
     # === 設定読み込み ===
@@ -203,8 +206,11 @@ def main():
         morning_config = yaml.safe_load(f)
     with open("config/afternoon_config.yaml", "r", encoding="utf-8") as f:
         afternoon_config = yaml.safe_load(f)
+    with open("config/overnight_config.yaml", "r", encoding="utf-8") as f:
+        overnight_config = yaml.safe_load(f)
 
     initial_capital = morning_config["global"]["initial_capital"]
+    ong_capital = overnight_config["global"]["initial_capital"]
 
     # === 銘柄スクリーニング ===
     print("\n■ 銘柄スクリーニング...")
@@ -244,6 +250,30 @@ def main():
 
     print(f"\n  -> 午前: {len(morning_signals)}銘柄 / 午後: {len(afternoon_signals)}銘柄")
 
+    # === ONG データ取得 + シグナル生成 ===
+    print("\n■ ONG データ取得中...")
+    ong_tickers = overnight_config.get("tickers", [])
+    nikkei_etf_code = overnight_config.get("nikkei_etf", "1321.T")
+
+    ong_daily: dict = {}
+    for ticker in ong_tickers:
+        df_d = load_daily(ticker)
+        if df_d is not None and not df_d.empty:
+            ong_daily[ticker] = df_d
+        print(".", end="", flush=True)
+
+    # 日経225 ETF (夜間追い風近似)
+    nikkei_etf_df = load_daily(nikkei_etf_code)
+    print(f"\n  -> ONG: {len(ong_daily)}銘柄 / ETF({'OK' if nikkei_etf_df is not None else 'NG'})")
+
+    print("\n■ ONG シグナル生成中...")
+    ong_signals = generate_ong_signals(ong_daily, nikkei_etf_df, overnight_config)
+    ong_signal_count = sum(
+        int(df["ONG_signal"].sum()) for df in ong_signals.values()
+        if "ONG_signal" in df.columns
+    )
+    print(f"  -> ONG シグナル総数: {ong_signal_count}")
+
     # === バックテスト実行 ===
     print("\n■ バックテスト実行...")
 
@@ -257,14 +287,20 @@ def main():
     afternoon_engine = AfternoonBacktestEngine("config/afternoon_config.yaml")
     afternoon_result = afternoon_engine.run(afternoon_signals)
 
-    # === 合算 ===
-    all_trades = morning_result.trades + afternoon_result.trades
-    total_pnl = sum(t.pnl for t in all_trades)
-    total_return = (total_pnl / initial_capital) * 100
-    equity_final = initial_capital + total_pnl
+    # ONG
+    print("  [ONG v1.0] 実行中...")
+    ong_engine = OvernightGapEngine("config/overnight_config.yaml")
+    ong_result = ong_engine.run(ong_signals)
 
+    # === 合算 ===
+    all_trades = morning_result.trades + afternoon_result.trades + ong_result.trades
     morning_pnl = sum(t.pnl for t in morning_result.trades)
     afternoon_pnl = sum(t.pnl for t in afternoon_result.trades)
+    ong_pnl = sum(t.pnl for t in ong_result.trades)
+    total_pnl = morning_pnl + afternoon_pnl + ong_pnl
+    combined_capital = initial_capital + ong_capital
+    total_return = (total_pnl / combined_capital) * 100
+    equity_final = combined_capital + total_pnl
 
     # 合算DD（簡易: 各セッションの最大DDの大きい方）
     def calc_dd(equity_curve):
@@ -282,25 +318,28 @@ def main():
 
     morning_dd = calc_dd(morning_result.equity_curve)
     afternoon_dd = calc_dd(afternoon_result.equity_curve)
+    ong_dd = calc_dd(ong_result.equity_curve)
 
-    # === レポート出力（従来の総合サマリ）===
+    # === レポート出力（総合サマリ）===
     if not args.no_summary:
         report = f"""
 ============================================================
-  午前v12.4 + 午後リバーサルv1.2 合体レポート
+  午前v12.4 + 午後リバーサルv1.2 + ONGv1.0 合体レポート
 ============================================================
 
 ■ 総合成績
-  初期資金:       {initial_capital:>14,.0f} 円
+  初期資金:       {combined_capital:>14,.0f} 円  (AM/PM {initial_capital:,.0f} + ONG {ong_capital:,.0f})
   最終資産:       {equity_final:>14,.0f} 円
   純損益:         {total_pnl:>+14,.0f} 円 ({total_return:+.2f}%)
   総トレード数:   {len(all_trades)}
     午前:         {len(morning_result.trades)}件 -> {morning_pnl:>+,.0f} 円
     午後:         {len(afternoon_result.trades)}件 -> {afternoon_pnl:>+,.0f} 円
+    ONG:          {len(ong_result.trades)}件 -> {ong_pnl:>+,.0f} 円
 
 ■ セッション別詳細
 {format_report_section("午前 v12.4 モーニング・モメンタム", morning_result.trades, initial_capital, morning_result.equity_curve)}
 {format_report_section("午後 v1.2 アフタヌーン・リバーサル", afternoon_result.trades, initial_capital, afternoon_result.equity_curve)}
+{format_report_section("オーバーナイト・ギャップ", ong_result.trades, ong_capital, ong_result.equity_curve)}
 """
         print(report)
 
@@ -308,8 +347,12 @@ def main():
     # Trade Export & Daily Report (new features)
     # ===========================================================
 
-    # Build unified trades DataFrame
-    trades_df = build_trades_df(morning_result.trades, afternoon_result.trades)
+    # Build unified trades DataFrame (AM + PM + ONG)
+    trades_df = build_trades_df(
+        morning_result.trades,
+        afternoon_result.trades,
+        ong_result.trades,
+    )
 
     if trades_df.empty:
         print("\n⚠️ トレードが0件のため、日次レポート・エクスポートはスキップします。")
