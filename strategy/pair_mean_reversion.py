@@ -441,6 +441,8 @@ class PairMeanReversionEngine:
         long_pool = filtered_df[long_mask]
         short_pool = filtered_df[short_mask]
 
+        # long_mask と short_mask は排他的（daily_return < -1% と > +1% は同時不成立）
+        # 万が一両側に入った銘柄はいずれかのプールにのみ存在する
         logger.debug(
             f"候補選定: ロング={len(long_pool)}銘柄  ショート={len(short_pool)}銘柄"
         )
@@ -466,10 +468,10 @@ class PairMeanReversionEngine:
         Returns:
             (long_tickers, short_tickers) のタプル
         """
-        def _select(pool: pd.DataFrame, ascending: bool, n: int) -> list[str]:
+        def _select(pool: pd.DataFrame, score_ascending: bool, n: int) -> list[str]:
             if pool.empty:
                 return []
-            sorted_pool = pool.sort_values("score", ascending=ascending)
+            sorted_pool = pool.sort_values("score", ascending=score_ascending)
             selected: list[str] = []
             sector_count: dict[str, int] = {}
             for ticker, row in sorted_pool.iterrows():
@@ -481,8 +483,8 @@ class PairMeanReversionEngine:
                     sector_count[sector] = sector_count.get(sector, 0) + 1
             return selected
 
-        long_tickers = _select(long_pool, ascending=True, n=self.max_positions_per_side)
-        short_tickers = _select(short_pool, ascending=False, n=self.max_positions_per_side)
+        long_tickers = _select(long_pool, score_ascending=True, n=self.max_positions_per_side)
+        short_tickers = _select(short_pool, score_ascending=False, n=self.max_positions_per_side)
 
         return long_tickers, short_tickers
 
