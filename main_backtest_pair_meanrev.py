@@ -294,6 +294,39 @@ def save_daily_pnl_csv(result: PairBacktestResult, save_path: str) -> None:
     logger.info(f"日別 PnL CSV 保存: {save_path}")
 
 
+def save_monthly_pnl_csv(result: PairBacktestResult, save_path: str) -> None:
+    """月別 PnL を CSV に保存する（NEW）。
+
+    Args:
+        result:    バックテスト結果
+        save_path: 保存先 CSV パス
+    """
+    if not result.trades:
+        logger.warning("トレードデータがありません")
+        return
+
+    monthly_pnl: dict[str, float] = {}
+    for t in result.trades:
+        month_key = t.trade_date[:7]  # "YYYY-MM"
+        monthly_pnl[month_key] = monthly_pnl.get(month_key, 0.0) + t.pnl
+
+    rows = [{"month": m, "pnl": round(v, 0)} for m, v in sorted(monthly_pnl.items())]
+    pd.DataFrame(rows).to_csv(save_path, index=False, encoding="utf-8-sig")
+    logger.info(f"月別 PnL CSV 保存: {save_path}")
+
+
+def save_report_txt(report_text: str, save_path: str) -> None:
+    """テキストレポートをファイルに保存する（NEW）。
+
+    Args:
+        report_text: レポート文字列
+        save_path:   保存先ファイルパス
+    """
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write(report_text)
+    logger.info(f"テキストレポート保存: {save_path}")
+
+
 # ---------------------------------------------------------------------------
 # メイン
 # ---------------------------------------------------------------------------
@@ -408,15 +441,21 @@ def main() -> None:
     eq_path = os.path.join(args.output, "pair_meanrev_equity.png")
     trades_path = os.path.join(args.output, "pair_meanrev_trades.csv")
     dpnl_path = os.path.join(args.output, "pair_meanrev_daily_pnl.csv")
+    mpnl_path = os.path.join(args.output, "pair_meanrev_monthly_pnl.csv")
+    report_path = os.path.join(args.output, "pair_meanrev_report.txt")
 
     save_equity_curve(result, engine.initial_capital, eq_path)
     save_trades_csv(result, trades_path)
     save_daily_pnl_csv(result, dpnl_path)
+    save_monthly_pnl_csv(result, mpnl_path)
+    save_report_txt(report_text, report_path)
 
     print(f"\n■ 出力ファイル")
     print(f"  エクイティカーブ: {eq_path}")
     print(f"  トレード一覧:     {trades_path}")
     print(f"  日別PnL:          {dpnl_path}")
+    print(f"  月別PnL:          {mpnl_path}")
+    print(f"  テキストレポート: {report_path}")
     print("\n完了\n")
 
 
@@ -456,19 +495,26 @@ def _run_compare_mode(
         result = engine.run(intraday_data, daily_data, topix_intraday, topix_daily)
         results[mode] = (engine, result)
 
-        # 個別レポート出力
-        print(generate_full_report(result, engine.initial_capital, mode))
+        # 個別レポート出力（トレードあり/なし問わず表示）
+        individual_report = generate_full_report(result, engine.initial_capital, mode)
+        print(individual_report)
 
         if result.trades:
             eq_path = os.path.join(args.output, f"pair_meanrev_equity_{mode}.png")
             trades_path = os.path.join(args.output, f"pair_meanrev_trades_{mode}.csv")
             dpnl_path = os.path.join(args.output, f"pair_meanrev_daily_pnl_{mode}.csv")
+            mpnl_path = os.path.join(args.output, f"pair_meanrev_monthly_pnl_{mode}.csv")
+            report_txt_path = os.path.join(args.output, f"pair_meanrev_report_{mode}.txt")
             save_equity_curve(result, engine.initial_capital, eq_path)
             save_trades_csv(result, trades_path)
             save_daily_pnl_csv(result, dpnl_path)
+            save_monthly_pnl_csv(result, mpnl_path)
+            save_report_txt(individual_report, report_txt_path)
             print(f"  エクイティカーブ: {eq_path}")
             print(f"  トレード一覧:     {trades_path}")
             print(f"  日別PnL:          {dpnl_path}")
+            print(f"  月別PnL:          {mpnl_path}")
+            print(f"  テキストレポート: {report_txt_path}")
 
     # 比較レポート
     engine_imm, result_imm = results.get("immediate", (None, PairBacktestResult()))

@@ -1,26 +1,26 @@
 global:
-  initial_capital: 5000000
-  max_positions_per_side: 3        # 2→3に拡大
-  risk_per_position: 0.20          # 25%→20%に分散
+  initial_capital: 5000000         # 信用取引資金 500万円
+  max_positions_per_side: 2        # 片側最大2銘柄（ロング2+ショート2）
+  risk_per_position: 0.25          # 1銘柄あたり資金の25%（125万円/銘柄）
   commission_rate: 0.0             # デイトレ信用手数料無料
-  slippage_rate: 0.001             # スリッページ0.1%
+  slippage_rate: 0.001             # スリッページ0.1%（片道）
 
 timing:
-  signal_eval_time: 1125           # シグナル評価時刻
-  entry_time: 1130                 # エントリー時刻（前場引け）
-  exit_mode: "immediate"           # "immediate"=後場寄り / "delayed"=12:35決済
-  exit_time_immediate: 1230        # 後場寄り
-  exit_time_delayed: 1235          # 遅延決済
-  force_close_time: 1235           # タイムストップ
+  signal_eval_time: 1125           # シグナル評価時刻（11:25前場データ確定）
+  entry_time: 1130                 # エントリー時刻（11:30前場引け）
+  exit_mode: "immediate"           # "immediate"=後場寄り(12:30) / "delayed"=12:35決済
+  exit_time_immediate: 1230        # 後場寄り即時決済
+  exit_time_delayed: 1235          # 遅延決済タイムストップ
+  force_close_time: 1235           # 強制決済タイムストップ
 
 scoring:
   weights:
-    daily_return: 0.30
-    relative_return: 0.25
-    late_morning_momentum: 0.20
-    vwap_deviation: 0.15
-    volume_ratio: 0.10
-  min_abs_score_threshold: 0.3     # 順張りでエントリー機会を増やすため低め設定（逆張り時0.5から引き下げ）
+    daily_return: 0.30             # 当日騰落率
+    relative_return: 0.25          # TOPIX比相対リターン
+    late_morning_momentum: 0.20    # 前場後半モメンタム（11:00〜11:25）
+    vwap_deviation: 0.15           # 前場VWAP乖離率
+    volume_ratio: 0.10             # 前場出来高倍率
+  min_abs_score_threshold: 0.5     # |score| ≥ 0.5 のみエントリー
 
 entry_thresholds:
   long_daily_return_min: 0.01      # 前日比+1.0%以上（上昇モメンタム追随）
@@ -32,23 +32,38 @@ entry_thresholds:
   min_volume_ratio: 0.5            # 出来高が20日平均の0.5倍以上
 
 filters:
-  min_morning_turnover: 3000000000 # 前場売買代金30億円（20億→30億に引き上げ）
-  max_daily_return_pct: 5.0        # 騰落率±5%超除外
-  max_late_momentum_pct: 3.0       # 後半モメンタム±3%超除外
-  max_volume_ratio: 5.0            # 出来高倍率5倍以上除外（材料株の可能性高い）
-  max_topix_move_pct: 2.0          # TOPIX前場±2%超で見送り
+  min_morning_turnover: 2000000000 # 前場売買代金下限20億円（流動性フィルタ）
+  max_daily_return_pct: 5.0        # 騰落率±5%超除外（材料株除外）
+  max_late_momentum_pct: 3.0       # 後半モメンタム±3%超除外（値動き異常）
+  max_volume_ratio_alert: 3.0      # 出来高倍率3倍超でアラート
+  max_volume_ratio_exclude: 5.0    # 出来高倍率5倍以上で除外（材料株の可能性大）
+  max_gap_pct: 3.0                 # 寄付きギャップ±3%超で除外（異常値除外）
+  max_range_atr_ratio: 2.0         # 前場レンジ/前日ATR(14) ≥ 2.0で除外
+  max_late_surge_pct: 1.5          # 前場終盤(11:15〜11:25)急変±1.5%超で除外
+  max_topix_move_pct: 2.0          # TOPIX前場±2%超で地合いフィルタ
   max_topix_late_move_pct: 0.5     # TOPIX終盤(11:00-11:25)急変フィルタ
-  max_same_sector_per_side: 1      # 同一セクター片側最大1
-  volume_ratio_exclude_threshold: 5.0  # 出来高倍率5倍以上で除外（決算・IR等の材料株代理）
-  max_gap_pct: 3.0                     # 寄付きギャップ±3%超で除外（値動き異常）
-  max_same_sector_total: 2             # ロング+ショート合計で同一セクター最大2
+  max_same_sector_per_side: 1      # 同一セクター片側最大1銘柄
+  no_cross_sector_overlap: true    # ロング・ショート間でも同セクター重複を回避
+  # 後方互換性のためのエイリアス（旧パラメータ名）
+  max_volume_ratio: 5.0
+  volume_ratio_exclude_threshold: 5.0
+  max_same_sector_total: 2
 
 exit:
-  stop_loss_pct: 0.008             # ストップロス0.8%
-  take_profit_pct: 0.006           # 利確0.6%（順張りは利が伸びやすいため拡大）
-  force_close_time: 1235           # 強制決済
+  stop_loss_pct: 0.006             # ストップロス0.6%
+  take_profit_pct: 0.004           # 利確0.4%
+  force_close_time: 1235           # 強制決済タイムストップ
 
 risk:
-  max_daily_loss: 0.02             # 1.5%→2.0%に緩和
+  max_daily_loss: 0.015            # 日次損失1.5%超で当日追加エントリー停止
+  max_net_exposure_pct: 0.05       # ネットエクスポージャ(ロング-ショート)±5%以内
+  beta_adjust: false               # β調整オプション（true=β中立化）
   max_consecutive_losses: 5        # 連敗停止: 直近N回連続負けで翌日見送り
   max_gross_exposure_pct: 1.0      # グロスエクスポージャ上限（初期資金の100%）
+
+reporting:
+  show_monthly_pnl: true           # 月別PnL表示
+  show_sector_breakdown: true      # セクター別成績表示
+  show_long_short_split: true      # LONG/SHORT別成績表示
+  show_streak: true                # 連勝/連敗記録表示
+  save_report_txt: true            # テキストレポートをファイル保存
