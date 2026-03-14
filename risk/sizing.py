@@ -14,6 +14,7 @@ def calc_position_size(
         return 0
 
     size = int(risk_amount / sl_distance)
+    size = (size // 100) * 100   # 100株単位に丸め
     return max(size, 0)
 
 

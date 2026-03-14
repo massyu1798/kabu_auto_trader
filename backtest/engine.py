@@ -284,6 +284,7 @@ class BacktestEngine:
                     risk_amount = capital * self.risk_per_trade
                     sl_distance = atr_val * self.sl_atr_mult
                     size = int(risk_amount / sl_distance)
+                    size = (size // 100) * 100   # 100株単位に丸め
                     if size <= 0:
                         continue
 
