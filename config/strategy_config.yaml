@@ -9,6 +9,7 @@ global:
   max_daily_loss: 0.03
   commission_rate: 0.0
   slippage_rate: 0.0001
+  max_holding_days: 0              # ← この行を追加（デイトレ=0）
 
 screening:
   enabled: true

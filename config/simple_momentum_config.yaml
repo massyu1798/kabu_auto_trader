@@ -10,8 +10,8 @@ timing:
   entry_time: 1130                 # エントリー時刻（11:30前場引け）
 
 strategy:
-  direction: "momentum"            # "momentum"=順張り(値幅 ≥ 3.0%)
-  min_move_pct: 3.0                # 値幅閾値 3%
+  direction: "momentum"            # "momentum"=順張り / "meanrev"=逆張り  ★四象限の切替ポイント①
+  max_move_pct: 3.0                # 値幅閾値 3%                           ★四象限の切替ポイント②
 
 exit:
   exit_mode: "market_open"        # 後場寄り成行のみ（SL/TP/タイムストップなし）

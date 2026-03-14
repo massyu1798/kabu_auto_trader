@@ -3,11 +3,21 @@ cd C:\kabu_auto_trader
 venv\Scripts\activate
 
 実行コード
-V12
+
+シンプル順張り
+python main_backtest_simple_momentum.py
+
+モーニングモメンタム v12	
 python main_backtest.py
 
-午後リバーサル
+午後リバーサル		
 python main_backtest_afternoon.py
 
-合体版
+合体（午前+午後+ONG）
 python main_backtest_combined.py
+
+オーバーナイトギャップ
+（合体経由で実行）
+
+シンプル順張り＋午前v12.4＋午後リバーサル＋ONG の4戦略合体バックテスト
+python main_backtest_all_combined.py

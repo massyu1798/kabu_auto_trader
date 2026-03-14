@@ -1,6 +1,36 @@
-今後コードを更新したら
+クイックリファレンス
 
+cd C:\kabu_auto_trader
+
+最新をpull	
+git pull origin main
+
+タグ一覧を確認	
+git fetch --all --tags && git tag -l
+
+タグ指定で切替	
+git checkout tags/v1.0.0
+
+元のブランチに戻る	
+git checkout main
+
+変更を push	
 git add .
-git commit -m "変更内容のメモ"
-git push
-この3行だけでGitHubに反映できます。お疲れさまでした！
+git commit -m "メッセージ"
+git push origin main
+
+タグを作成＆push	
+git tag -a v1.0.0 -m "メッセージ"
+git push origin v1.0.0
+
+Latest Release に設定	
+gh release create v1.0.0 --title "v1.0.0" --notes "説明" --latest
+
+mainを特定のブランチに戻す形で変更
+git checkout main
+git pull origin main
+git reset --hard e1a0108d7dbbcaa4143b1f3a69ba39a92425ff07
+git push --force origin main
+　※git reset --hard の引数は ブランチ名 または コミットSHA を指定します
+　　ブランチ名: origin/copilot/integrate-overnight-gap-strategy
+　　または SHA: e1a0108d7dbbcaa4143b1f3a69ba39a92425ff07
