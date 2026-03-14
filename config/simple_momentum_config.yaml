@@ -3,15 +3,15 @@ global:
   max_positions_per_side: 2        # 片側最大2銘柄（ロング2+ショート2）
   risk_per_position: 0.25          # 1銘柄あたり資金の25%（125万円/銘柄）
   commission_rate: 0.0             # デイトレ信用手数料無料
-  slippage_rate: 0.001             # スリッページ0.1%（片道）
+  slippage_rate: 0.0001             # スリッページ0.01%（片道）
 
 timing:
   signal_eval_time: 1125           # シグナル評価時刻（11:25前場データ確定）
   entry_time: 1130                 # エントリー時刻（11:30前場引け）
 
 strategy:
-  direction: "momentum"            # "momentum"=順張り / "meanrev"=逆張り  ★四象限の切替ポイント①
-  min_move_pct: 3.0                # 値幅閾値 3%                           ★四象限の切替ポイント②
+  direction: "momentum"            # "momentum"=順張り(値幅 ≥ 3.0%)
+  min_move_pct: 3.0                # 値幅閾値 3%
 
 exit:
   exit_mode: "market_open"        # 後場寄り成行のみ（SL/TP/タイムストップなし）

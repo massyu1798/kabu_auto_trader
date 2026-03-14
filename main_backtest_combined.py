@@ -147,9 +147,14 @@ def format_report_section(title, trades, initial_capital, equity_curve):
             if dd > max_dd:
                 max_dd = dd
 
+    margin = 3_000_000
+    margin_ratio = (total_pnl / margin) * 100.0
+
     return f"""
   [{title}]
     純損益:         {total_pnl:>+14,.0f} 円 ({total_return:+.2f}%)
+    信用保証金:     {margin:>14,.0f} 円
+    保証金比率:     {margin_ratio:>+13.2f} %  (= 純損益 / 保証金)
     最大DD:         {max_dd:>13.2f} %
     トレード数:     {total_trades} (勝ち{len(wins)} / 負け{len(losses)})
     勝率:           {win_rate:.1f}%
@@ -322,6 +327,8 @@ def main():
 
     # === レポート出力（総合サマリ）===
     if not args.no_summary:
+        margin = 3_000_000
+        margin_ratio = (total_pnl / margin) * 100.0
         report = f"""
 ============================================================
   午前v12.4 + 午後リバーサルv1.2 + ONGv1.0 合体レポート
@@ -331,6 +338,8 @@ def main():
   初期資金:       {combined_capital:>14,.0f} 円  (AM/PM {initial_capital:,.0f} + ONG {ong_capital:,.0f})
   最終資産:       {equity_final:>14,.0f} 円
   純損益:         {total_pnl:>+14,.0f} 円 ({total_return:+.2f}%)
+  信用保証金:     {margin:>14,.0f} 円
+  保証金比率:     {margin_ratio:>+13.2f} %  (= 純損益 / 保証金)
   総トレード数:   {len(all_trades)}
     午前:         {len(morning_result.trades)}件 -> {morning_pnl:>+,.0f} 円
     午後:         {len(afternoon_result.trades)}件 -> {afternoon_pnl:>+,.0f} 円

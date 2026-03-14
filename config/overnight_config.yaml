@@ -6,7 +6,7 @@
 global:
   initial_capital: 5000000      # 500万円
   max_risk_per_trade: 100000    # 1トレード最大損失額 (円)
-  slippage_rate: 0.001
+  slippage_rate: 0.0001
   commission_rate: 0.0
 
 ong:

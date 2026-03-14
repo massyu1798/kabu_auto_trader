@@ -1,21 +1,11 @@
 """
-シンプル順張り（逆張り）戦略 シグナル生成エンジン
-
-四象限バックテスト: 第1象限 (順張り × 値幅3%以上)
+シンプル順張り(値幅 ≥ 3.0%) シグナル生成エンジン
 
 戦略概要:
   - 前場（9:00〜11:25）の騰落率（当日始値 vs 11:25終値）が +3%以上 → ロング
   - 前場の騰落率が -3%以下 → ショート
   - 値幅3%未満の銘柄は対象外（シグナルなし）
   - 候補銘柄を前場出来高の降順でソートし、上位 max_positions_per_side 件を選定
-
-四象限の切替ガイド:
-  | 象限           | direction    | min_move_pct | ロング条件        | ショート条件      |
-  |----------------|--------------|--------------|-------------------|-------------------|
-  | 順張り×3%以上  | "momentum"   | 3.0          | 騰落率 ≥ +3%      | 騰落率 ≤ -3%      |
-  | 順張り×3%未満  | "momentum"   | 変更不要      | 0% < 騰落率 < +3% | -3% < 騰落率 < 0% |
-  | 逆張り×3%以上  | "meanrev"    | 3.0          | 騰落率 ≤ -3%      | 騰落率 ≥ +3%      |
-  | 逆張り×3%未満  | "meanrev"    | 変更不要      | -3% < 騰落率 < 0% | 0% < 騰落率 < +3% |
 """
 
 from __future__ import annotations
@@ -26,17 +16,17 @@ from typing import Optional
 import pandas as pd
 import yaml
 
-# UNIVERSE は pair_mean_reversion.py から流用（重複定義しない）
+# UNIVERSE は strategy/universe.py から import
 try:
-    from strategy.pair_mean_reversion import UNIVERSE
+    from strategy.universe import UNIVERSE
 except ImportError:
-    from pair_mean_reversion import UNIVERSE  # type: ignore
+    from universe import UNIVERSE  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 
 class SimpleMomentumEngine:
-    """シンプル順張り（逆張り）戦略のシグナル生成エンジン。
+    """シンプル順張り(値幅 ≥ 3.0%)戦略のシグナル生成エンジン。
 
     使用方法:
         engine = SimpleMomentumEngine("config/simple_momentum_config.yaml")

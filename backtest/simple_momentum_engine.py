@@ -1,5 +1,5 @@
 """
-シンプル順張り戦略専用バックテストエンジン
+シンプル順張り(値幅 ≥ 3.0%)専用バックテストエンジン
 
 エントリー: 11:25バー close + スリッページ
 エグジット: 12:30バー open（フォールバック: 12:35バー close）
@@ -16,15 +16,14 @@ from typing import Optional
 import pandas as pd
 import yaml
 
-# Side, PairTrade, PairBacktestResult は pair_meanrev_engine.py から流用（重複定義しない）
 try:
-    from backtest.pair_meanrev_engine import Side, PairTrade, PairBacktestResult
+    from backtest.models import Side, PairTrade, PairBacktestResult
     from strategy.simple_momentum import SimpleMomentumEngine
-    from strategy.pair_mean_reversion import UNIVERSE
+    from strategy.universe import UNIVERSE
 except ImportError:
-    from pair_meanrev_engine import Side, PairTrade, PairBacktestResult  # type: ignore
+    from models import Side, PairTrade, PairBacktestResult  # type: ignore
     from simple_momentum import SimpleMomentumEngine  # type: ignore
-    from pair_mean_reversion import UNIVERSE  # type: ignore
+    from universe import UNIVERSE  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -516,17 +515,21 @@ class SimpleMomentumBacktestEngine:
 
         direction_str = "順張り" if self.strategy.direction == "momentum" else "逆張り"
         min_move = self.strategy.min_move_pct
+        margin = 3_000_000
+        margin_ratio = (total_pnl / margin) * 100.0
 
         report = f"""
 ============================================================
-     シンプル{direction_str}戦略 バックテストレポート
-     (値幅 ≥ {min_move:.1f}%  後場寄り成行決済)
+     シンプル順張り(値幅 ≥ {min_move:.1f}%) バックテストレポート
+     (後場寄り成行決済)
 ============================================================
 
 ■ 概要
   初期資金:          {ic:>15,.0f} 円
   最終資産:          {equity_final:>15,.0f} 円
   純損益:            {total_pnl:>+15,.0f} 円 ({total_ret:+.2f}%)
+  信用保証金:        {margin:>15,.0f} 円
+  保証金比率:        {margin_ratio:>+14.2f} %  (= 純損益 / 保証金)
   最大DD:            {max_dd_pct:>14.2f} %  ({max_dd_amount:>+12,.0f} 円)
   Sharpe 比率:       {sharpe:>14.3f}
   Calmar 比率:       {calmar:>14.3f}
