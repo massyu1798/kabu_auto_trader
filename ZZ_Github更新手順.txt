@@ -34,3 +34,28 @@ git push --force origin main
 　※git reset --hard の引数は ブランチ名 または コミットSHA を指定します
 　　ブランチ名: origin/copilot/integrate-overnight-gap-strategy
 　　または SHA: e1a0108d7dbbcaa4143b1f3a69ba39a92425ff07
+
+特定のファイルだけ取得する方法
+# まずリモートの最新情報を取得
+git fetch origin
+# 特定のファイルだけリモートの内容で上書き
+git checkout origin/main -- path/to/file.txt
+# 複数ファイルも指定可能
+git checkout origin/main -- path/to/file1.txt path/to/file2.txt
+
+
+更新の有無にかかわらず、すべてのファイルを強制的に pull する方法
+# リモートの最新情報を取得
+git fetch origin
+# ローカルのブランチをリモートの状態に強制的にリセット
+git reset --hard origin/main
+⚠️ 注意: git reset --hard はローカルの未コミットの変更をすべて失います。
+
+
+特定のファイルだけ add → commit → push
+# 特定のファイルだけステージング（add）する
+git add path/to/file1.txt path/to/file2.txt
+# そのファイルだけをコミット
+git commit -m "特定のファイルだけ更新"
+# push する
+git push origin main
