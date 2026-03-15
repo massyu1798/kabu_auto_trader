@@ -16,6 +16,7 @@ JP Stock Auto Trading Bot v18.0 - multi-lot hold_entries + spec-aligned margin
          multi-lot hold_entries from /positions, safe close flow
 """
 
+import copy
 import math
 import time
 import yaml
@@ -25,10 +26,13 @@ import yfinance as yf
 from datetime import datetime, date as date_type, timedelta
 from core.auth import KabuAuth
 from core.api_client import KabuClient
-from core.order_manager import OrderManager, LivePosition, MARGIN_TRADE_TYPE_LABELS
+from core.order_manager import OrderManager, LivePosition, HoldEntry, MARGIN_TRADE_TYPE_LABELS
 from core.bar_builder import BarBuilder
 from strategy.ensemble import EnsembleEngine
 from strategy.afternoon_reversal import AfternoonReversalEngine
+from strategy.overnight_gap import generate_ong_signals, BLACKOUT_DATES
+from strategy.simple_momentum import SimpleMomentumEngine
+from strategy.universe import UNIVERSE
 from backtest.screener import screen_stocks
 
 # Minimum completed 5-min bars required for signal calculation
@@ -69,6 +73,11 @@ BLOCK_MINUTES_UNKNOWN = 10
 # Use 27 (東証+) or 9 (SOR).
 DEFAULT_ORDER_EXCHANGE = 27
 
+# ONG: MarginTradeType=2 (一般信用長期) — overnight hold required
+ONG_MARGIN_TRADE_TYPE = 2
+# SM: MarginTradeType=3 (一般信用デイトレ) — same as AM/PM
+SM_MARGIN_TRADE_TYPE = 3
+
 
 def load_config():
     with open("config/live_config.yaml", "r", encoding="utf-8") as f:
@@ -80,7 +89,17 @@ def load_config():
             afternoon = yaml.safe_load(f)
     except FileNotFoundError:
         afternoon = None
-    return live, strategy, afternoon
+    try:
+        with open("config/overnight_config.yaml", "r", encoding="utf-8") as f:
+            ong = yaml.safe_load(f)
+    except FileNotFoundError:
+        ong = None
+    try:
+        with open("config/simple_momentum_config.yaml", "r", encoding="utf-8") as f:
+            sm = yaml.safe_load(f)
+    except FileNotFoundError:
+        sm = None
+    return live, strategy, afternoon, ong, sm
 
 
 # ============================================
@@ -207,6 +226,27 @@ def is_market_close_force() -> bool:
     now = datetime.now()
     t = now.hour * 100 + now.minute
     return t >= 1520
+
+
+def is_ong_exit_window() -> bool:
+    """9:00-9:05: ONG翌朝成行決済ウィンドウ"""
+    now = datetime.now()
+    t = now.hour * 100 + now.minute
+    return 900 <= t <= 905
+
+
+def is_sm_exit_window() -> bool:
+    """12:30-12:34: SM後場寄り成行決済ウィンドウ"""
+    now = datetime.now()
+    t = now.hour * 100 + now.minute
+    return 1230 <= t <= 1234
+
+
+def is_ong_entry_window() -> bool:
+    """14:50-15:00: ONG引け前発注ウィンドウ"""
+    now = datetime.now()
+    t = now.hour * 100 + now.minute
+    return 1450 <= t <= 1500
 
 
 def get_session_label(pm_start: int = 1230, pm_end: int = 1400) -> str:
@@ -512,10 +552,48 @@ def calc_entry_params(side: str, entry_price: float, sl_dist: float, tp_dist: fl
 
 
 # ============================================
+# ONG: Load historical daily data for RSI/ATR
+# ============================================
+
+def load_ong_daily_data(ong_cfg: dict) -> dict[str, pd.DataFrame]:
+    """ONG対象銘柄の日足データをyfinanceから取得（起動時に一度だけ呼ぶ）。
+
+    RSI(2)・ATR(14)計算に必要な過去データを取得する。
+    当日データは 14:50 に /board から取得するため、ここでは除外する。
+    """
+    tickers_yf = ong_cfg.get("tickers", [])
+    today_dt = date_type.today()
+    daily_data: dict[str, pd.DataFrame] = {}
+
+    print(f"\n■ Loading ONG daily history ({len(tickers_yf)} tickers)...")
+    for yf_ticker in tickers_yf:
+        kabu_ticker = yf_ticker.replace(".T", "")
+        try:
+            data = yf.download(yf_ticker, period="60d", interval="1d", progress=False)
+            if data is None or data.empty:
+                continue
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = [col[0].lower() for col in data.columns]
+            else:
+                data.columns = [col.lower() for col in data.columns]
+            # Exclude today's row — will be appended from /board at 14:50
+            data = data[data.index.date < today_dt]
+            if len(data) < 20:
+                print(f"  ⚠️ {yf_ticker}: insufficient history ({len(data)} rows) — skip")
+                continue
+            daily_data[kabu_ticker] = data
+        except Exception as e:
+            print(f"  ⚠️ ONG daily load failed for {yf_ticker}: {e}")
+
+    print(f"  -> Loaded history for {len(daily_data)}/{len(tickers_yf)} tickers")
+    return daily_data
+
+
+# ============================================
 # Main
 # ============================================
 def main():
-    live_cfg, strat_cfg, afternoon_cfg = load_config()
+    live_cfg, strat_cfg, afternoon_cfg, ong_cfg, sm_cfg = load_config()
 
     api_timeout = live_cfg.get("api", {}).get("timeout_sec",
                   live_cfg.get("api", {}).get("timeout", 10))
@@ -526,6 +604,44 @@ def main():
     order_mgr = OrderManager(client, live_cfg)
 
     blacklist = TickerBlacklist()
+
+    # ── ONG order manager (MarginTradeType=2: 一般信用長期) ──────────────
+    ong_enabled = live_cfg.get("ong", {}).get("enabled", False) and ong_cfg is not None
+    ong_order_mgr: OrderManager | None = None
+    ong_tickers_kabu: list[str] = []
+    ong_daily_data: dict[str, pd.DataFrame] = {}
+
+    if ong_enabled:
+        _ong_order_cfg = copy.deepcopy(live_cfg)
+        _ong_order_cfg["trade"]["margin_trade_type"] = ONG_MARGIN_TRADE_TYPE
+        _ong_order_cfg["trade"]["max_positions"] = live_cfg.get("ong", {}).get("max_positions", 3)
+        _ong_order_cfg["trade"]["max_daily_loss"] = 1.0   # 100% → effectively disables can_entry daily-loss gate for ONG
+        _ong_order_cfg["trade"]["initial_capital"] = ong_cfg["global"]["initial_capital"]
+        ong_order_mgr = OrderManager(client, _ong_order_cfg)
+
+        ong_tickers_kabu = [t.replace(".T", "") for t in ong_cfg.get("tickers", [])]
+        ong_daily_data = load_ong_daily_data(ong_cfg)
+
+    # ── SM order manager (MarginTradeType=3: 一般信用デイトレ) ───────────
+    sm_enabled = live_cfg.get("sm", {}).get("enabled", False) and sm_cfg is not None
+    sm_order_mgr: OrderManager | None = None
+    sm_tickers_kabu: list[str] = []
+    sm_engine: SimpleMomentumEngine | None = None
+    sm_bar_builder: BarBuilder | None = None
+
+    if sm_enabled:
+        _sm_max = live_cfg.get("sm", {}).get("max_positions_per_side", 2) * 2
+        _sm_order_cfg = copy.deepcopy(live_cfg)
+        _sm_order_cfg["trade"]["margin_trade_type"] = SM_MARGIN_TRADE_TYPE
+        _sm_order_cfg["trade"]["max_positions"] = _sm_max
+        _sm_order_cfg["trade"]["max_daily_loss"] = sm_cfg["risk"]["max_daily_loss"]
+        _sm_order_cfg["trade"]["initial_capital"] = sm_cfg["global"]["initial_capital"]
+        sm_order_mgr = OrderManager(client, _sm_order_cfg)
+
+        sm_tickers_kabu = [t.replace(".T", "") for t in UNIVERSE.keys()]
+        sm_engine = SimpleMomentumEngine("config/simple_momentum_config.yaml")
+        sm_bar_builder = BarBuilder(bar_interval_min=5)
+        print(f"  SM: {len(sm_tickers_kabu)} tickers loaded from UNIVERSE")
 
     trade_cfg = live_cfg.get("trade", {})
     live_max_positions = trade_cfg.get("max_positions", 2)
@@ -597,6 +713,15 @@ def main():
     signal_check_count = 0
     current_day = None
 
+    # ONG/SM: one-time daily action flags (reset on day change)
+    ong_exit_done_today: bool = False
+    ong_entry_done_today: bool = False
+    sm_signal_done_today: bool = False
+    sm_entry_done_today: bool = False
+    sm_exit_done_today: bool = False
+    sm_long_tickers_pending: list[str] = []
+    sm_short_tickers_pending: list[str] = []
+
     # per-ticker Exchange from board (for /board info queries only)
     ticker_exchange: dict[str, int] = {}
 
@@ -641,8 +766,64 @@ def main():
         print(f"       Cooldown: {'ON' if pm_cd_enabled else 'OFF'} loss={pm_cd_loss_min}min win={pm_cd_win_min}min")
     else:
         print("  [PM] afternoon_config.yaml not found - PM session disabled")
+    if ong_enabled:
+        _omtt = MARGIN_TRADE_TYPE_LABELS.get(ONG_MARGIN_TRADE_TYPE, "?")
+        print(f"  [ONG] Entry@14:50 Exit@9:00-9:05 | {len(ong_tickers_kabu)} tickers "
+              f"MTT={ONG_MARGIN_TRADE_TYPE}({_omtt}) max_pos={ong_order_mgr.trade_config['max_positions']}")
+    else:
+        print("  [ONG] disabled")
+    if sm_enabled:
+        print(f"  [SM] Signal@11:25 Entry@11:30 Exit@12:30 | {len(sm_tickers_kabu)} tickers "
+              f"risk_per_pos={sm_cfg['global']['risk_per_position']}")
+    else:
+        print("  [SM] disabled")
     print(f"  Min bars: {MIN_BARS}")
     print(f"  Force close: PM@{pm_force_close} / All@1520")
+
+    # ONG: Recover open ONG positions from /positions at startup
+    if ong_order_mgr and ong_tickers_kabu:
+        print("\n■ Checking for existing ONG positions to recover...")
+        try:
+            # product="2" = 信用取引 (margin) per kabu Station API spec
+            _raw_positions = client.get_positions(product="2")
+            for _pd in _raw_positions:
+                _sym = str(_pd.get("Symbol", ""))
+                if _sym not in ong_tickers_kabu:
+                    continue
+                _side_code = str(_pd.get("Side", ""))
+                _side = "BUY" if _side_code == "2" else "SELL"
+                _qty = int(_pd.get("LeavesQty", 0))
+                if _qty <= 0:
+                    continue
+                _exec_id = str(_pd.get("ExecutionID", ""))
+                if not _exec_id:
+                    continue
+                _price = float(_pd.get("Price", 0))
+                _exch = int(_pd.get("Exchange", DEFAULT_ORDER_EXCHANGE))
+                # Use ExecutionDay from /positions as entry_time if available,
+                # otherwise fall back to current time (position is still valid)
+                _exec_day_str = str(_pd.get("ExecutionDay", ""))
+                try:
+                    _entry_time = datetime.strptime(_exec_day_str, "%Y%m%d%H%M%S")
+                except (ValueError, TypeError):
+                    _entry_time = datetime.now()
+                _lp = LivePosition(
+                    ticker=_sym, side=_side,
+                    entry_price=_price, entry_time=_entry_time,
+                    size=_qty, stop_loss=_price * 0.9, take_profit=_price * 1.1,
+                    trailing_stop=_price * 0.9,
+                    exchange=_exch, order_exchange=_exch,
+                    hold_entries=[HoldEntry(hold_id=_exec_id, qty=_qty,
+                                            exchange=_exch, price=_price)],
+                    reason="recovered from /positions at startup",
+                    session="ONG",
+                )
+                ong_order_mgr.positions.append(_lp)
+                print(f"  ✅ Recovered ONG: {_sym} {_side} × {_qty} @ {_price:.0f} (ExecID={_exec_id})")
+            if not ong_order_mgr.positions:
+                print("  -> No ONG positions found")
+        except Exception as _e:
+            print(f"  ⚠️ ONG recovery failed: {_e}")
 
     try:
         while True:
@@ -653,6 +834,7 @@ def main():
             now = datetime.now()
             now_str = now.strftime("%H:%M:%S")
             today = now.date()
+            now_t = now.hour * 100 + now.minute
 
             if current_day != today:
                 if current_day is not None:
@@ -663,6 +845,24 @@ def main():
                 order_mgr.cooldown_until.clear()
                 blacklist.daily_reset()
                 ticker_exchange.clear()
+                # Reset ONG/SM daily state flags
+                ong_exit_done_today = False
+                ong_entry_done_today = False
+                sm_signal_done_today = False
+                sm_entry_done_today = False
+                sm_exit_done_today = False
+                sm_long_tickers_pending = []
+                sm_short_tickers_pending = []
+                if sm_bar_builder is not None:
+                    sm_bar_builder.reset()
+                if ong_order_mgr is not None:
+                    ong_order_mgr.daily_pnl = 0.0
+                    ong_order_mgr.daily_trade_count = 0
+                    ong_order_mgr.cooldown_until.clear()
+                if sm_order_mgr is not None:
+                    sm_order_mgr.daily_pnl = 0.0
+                    sm_order_mgr.daily_trade_count = 0
+                    sm_order_mgr.cooldown_until.clear()
                 print(f"  [{now_str}] Daily PnL/cooldown/blacklist/exchange reset")
 
             # Force close
@@ -675,6 +875,16 @@ def main():
                         current = pos.entry_price
                     print(f"  [{now_str}] 引け強制決済: {pos.ticker} {pos.side}")
                     order_mgr.exit(pos, current, "引け強制決済")
+                # SM failsafe: force-close any remaining SM positions at 15:20
+                if sm_order_mgr:
+                    for pos in list(sm_order_mgr.positions):
+                        try:
+                            board = client.get_board(pos.ticker)
+                            current = float(board.get("CurrentPrice", pos.entry_price) or pos.entry_price) if board else pos.entry_price
+                        except Exception:
+                            current = pos.entry_price
+                        print(f"  [{now_str}] [SM] 引け強制決済: {pos.ticker} {pos.side}")
+                        sm_order_mgr.exit(pos, current, "SM引け強制決済")
             elif is_force_close_pm(pm_force_close):
                 for pos in list(order_mgr.positions):
                     if hasattr(pos, 'entry_time') and pos.entry_time.hour >= 12:
@@ -698,6 +908,18 @@ def main():
                 except Exception as e:
                     pass
                 time.sleep(0.3)
+
+            # [SM] Poll /board for SM tickers during morning session (9:00-11:35)
+            # Stop after SM entry is done (no SL/TP management for SM — exits strictly at 12:30)
+            if sm_bar_builder is not None and not sm_entry_done_today and 900 <= now_t <= 1135:
+                for ticker in sm_tickers_kabu:
+                    try:
+                        board = client.get_board(ticker)
+                        if board and board.get("CurrentPrice"):
+                            sm_bar_builder.update(ticker, board)
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
 
             # Position management
             for pos in list(order_mgr.positions):
@@ -959,6 +1181,216 @@ def main():
                         elif action in ("ok", "retry_ok"):
                             pm_orders_placed += 1
 
+            # ──────────────────────────────────────────────────────────────
+            # ONG/SM Phase Checks (time-sensitive, one-time per day)
+            # ──────────────────────────────────────────────────────────────
+
+            # [ONG EXIT] 9:00-9:05: 前日ONG翌朝成行決済
+            if ong_order_mgr and not ong_exit_done_today and is_ong_exit_window():
+                ong_exit_done_today = True
+                if ong_order_mgr.positions:
+                    print(f"\n  [{now_str}] === [ONG EXIT] 翌朝成行決済 "
+                          f"({len(ong_order_mgr.positions)} positions) ===")
+                    for pos in list(ong_order_mgr.positions):
+                        try:
+                            _board = client.get_board(pos.ticker)
+                            _cur = (float(_board.get("CurrentPrice", pos.entry_price)
+                                         or pos.entry_price)
+                                    if _board else pos.entry_price)
+                        except Exception:
+                            _cur = pos.entry_price
+                        print(f"  [{now_str}] [ONG EXIT] {pos.ticker}: "
+                              f"current={_cur:.0f} entry={pos.entry_price:.0f}")
+                        ong_order_mgr.exit(pos, _cur, "ONG翌朝成行決済")
+                else:
+                    print(f"  [{now_str}] [ONG EXIT] No ONG positions to close")
+
+            # [SM SIGNAL] 11:25: 前場シグナル評価（1回のみ）
+            if sm_engine and sm_bar_builder and not sm_signal_done_today and now_t >= 1125:
+                sm_signal_done_today = True
+                print(f"\n  [{now_str}] === [SM SIGNAL] 前場シグナル評価 ===")
+                _morning_data: dict[str, pd.DataFrame] = {}
+                for _ticker in sm_tickers_kabu:
+                    _bars = sm_bar_builder.get_bars(_ticker)
+                    if _bars.empty:
+                        continue
+                    # Filter to current morning (bars up to 11:25)
+                    _mask = (_bars.index.hour * 100 + _bars.index.minute) <= 1125
+                    _mb = _bars[_mask]
+                    if not _mb.empty:
+                        _morning_data[_ticker] = _mb
+                if _morning_data:
+                    _sm_result = sm_engine.generate_daily_signal(_morning_data, {})
+                    if _sm_result:
+                        sm_long_tickers_pending, sm_short_tickers_pending = _sm_result
+                        print(f"  [SM] LONG:  {sm_long_tickers_pending}")
+                        print(f"  [SM] SHORT: {sm_short_tickers_pending}")
+                    else:
+                        sm_long_tickers_pending = []
+                        sm_short_tickers_pending = []
+                        print("  [SM] No signals generated")
+                else:
+                    sm_long_tickers_pending = []
+                    sm_short_tickers_pending = []
+                    print("  [SM] No morning bar data available")
+
+            # [SM ENTRY] 11:30: SM成行発注（1回のみ）
+            if sm_order_mgr and sm_signal_done_today and not sm_entry_done_today and now_t >= 1130:
+                sm_entry_done_today = True
+                _sm_capital = float(sm_cfg["global"]["initial_capital"])
+                _sm_risk = float(sm_cfg["global"]["risk_per_position"])
+                print(f"\n  [{now_str}] === [SM ENTRY] 発注 "
+                      f"(long={len(sm_long_tickers_pending)} "
+                      f"short={len(sm_short_tickers_pending)}) ===")
+                for _side, _tickers in (("BUY", sm_long_tickers_pending),
+                                        ("SELL", sm_short_tickers_pending)):
+                    for _ticker in _tickers:
+                        if not sm_order_mgr.can_entry(_ticker):
+                            print(f"  [SM] SKIP {_ticker}: can_entry=False")
+                            continue
+                        try:
+                            _board = client.get_board(_ticker)
+                            _price = float(_board.get("CurrentPrice", 0) or 0) if _board else 0
+                            if _price <= 0:
+                                print(f"  [SM] SKIP {_ticker}: invalid price={_price}")
+                                continue
+                            # SM: size = capital × risk_per_position / entry_price
+                            _size = int(_sm_capital * _sm_risk / _price)
+                            _size = max((_size // 100) * 100, 100)
+                            # Placeholder SL/TP (wide ±15%) — SM never hits them.
+                            # All SM positions are closed unconditionally at 12:30
+                            # via [SM EXIT] block, not via SL/TP logic.
+                            _sl = _price * 0.85 if _side == "BUY" else _price * 1.15
+                            _tp = _price * 1.15 if _side == "BUY" else _price * 0.85
+                            _notional = _price * _size
+                            print(f"  [{now_str}] [SM] >>> ENTRY {_side} {_ticker}: "
+                                  f"price={_price:.0f} size={_size} notional={_notional:,.0f}")
+                            sm_order_mgr.entry(
+                                _ticker, _side, _price, _size,
+                                stop_loss=_sl, take_profit=_tp,
+                                reason=f"SM順張り{'ロング' if _side == 'BUY' else 'ショート'}",
+                                session="SM",
+                                exchange=DEFAULT_ORDER_EXCHANGE,
+                            )
+                            time.sleep(ORDER_INTERVAL_SEC)
+                        except Exception as _e:
+                            print(f"  ⚠️ [SM] ENTRY {_side} {_ticker} error: {_e}")
+
+            # [SM EXIT] 12:30: SM後場寄り全決済（1回のみ）
+            if sm_order_mgr and not sm_exit_done_today and now_t >= 1230:
+                sm_exit_done_today = True
+                if sm_order_mgr.positions:
+                    print(f"\n  [{now_str}] === [SM EXIT] 後場寄り全決済 "
+                          f"({len(sm_order_mgr.positions)} positions) ===")
+                    for pos in list(sm_order_mgr.positions):
+                        try:
+                            _board = client.get_board(pos.ticker)
+                            _cur = (float(_board.get("CurrentPrice", pos.entry_price)
+                                         or pos.entry_price)
+                                    if _board else pos.entry_price)
+                        except Exception:
+                            _cur = pos.entry_price
+                        print(f"  [{now_str}] [SM EXIT] {pos.ticker} {pos.side}: "
+                              f"current={_cur:.0f}")
+                        sm_order_mgr.exit(pos, _cur, "SM後場寄り成行決済")
+
+            # [ONG ENTRY] 14:50-15:00: ONG引け前シグナル判定→成行買い（1回のみ）
+            if ong_order_mgr and not ong_entry_done_today and is_ong_entry_window():
+                ong_entry_done_today = True
+                _today_date = now.date()
+                _skip_friday = ong_cfg["ong"].get("skip_friday", True)
+                _ong_max_pos = ong_order_mgr.trade_config["max_positions"]
+                _ong_max_risk = float(ong_cfg["global"]["max_risk_per_trade"])
+                _atr_period = int(ong_cfg["ong"].get("atr_period", 14))
+                _atr_mult = float(ong_cfg["ong"].get("atr_risk_multiplier", 2.0))
+                _sl_pct = float(ong_cfg["ong"].get("stop_loss_pct", -1.0)) / 100.0
+
+                if _skip_friday and _today_date.weekday() == 4:
+                    print(f"\n  [{now_str}] [ONG] 本日は金曜日: エントリースキップ")
+                elif _today_date in BLACKOUT_DATES:
+                    print(f"\n  [{now_str}] [ONG] 本日はブラックアウト日: エントリースキップ")
+                else:
+                    print(f"\n  [{now_str}] === [ONG ENTRY] 引け前シグナル判定 ===")
+                    for _ticker in ong_tickers_kabu:
+                        if len(ong_order_mgr.positions) >= _ong_max_pos:
+                            print(f"  [ONG] Max positions reached ({_ong_max_pos})")
+                            break
+                        if _ticker not in ong_daily_data:
+                            continue
+                        if blacklist.is_blocked(_ticker):
+                            continue
+                        try:
+                            _board = client.get_board(_ticker)
+                            if not _board:
+                                continue
+                            _o = float(_board.get("OpeningPrice", 0) or 0)
+                            _h = float(_board.get("HighPrice", 0) or 0)
+                            _l = float(_board.get("LowPrice", 0) or 0)
+                            _c = float(_board.get("CurrentPrice", 0) or 0)
+                            _v = float(_board.get("TradingVolume", 0) or 0)
+                            if any(x <= 0 for x in [_o, _h, _l, _c]):
+                                continue
+                            # Append today's row to historical data
+                            _today_ts = pd.Timestamp(_today_date)
+                            _today_row = pd.DataFrame(
+                                {"open": [_o], "high": [_h], "low": [_l],
+                                 "close": [_c], "volume": [_v]},
+                                index=[_today_ts],
+                            )
+                            _full_df = pd.concat([ong_daily_data[_ticker], _today_row])
+                            # Pass nikkei_etf_df=None to skip the night-tailwind condition:
+                            # next-day ETF open is not yet known at 14:50, so we rely on
+                            # IBS + RSI(2) + decline-rate (3-condition live mode per spec)
+                            _sig_result = generate_ong_signals(
+                                {_ticker: _full_df}, None, ong_cfg
+                            )
+                            if _ticker not in _sig_result:
+                                continue
+                            _df_sig = _sig_result[_ticker]
+                            _last = _df_sig.iloc[-1]
+                            _ibs = float(_last.get("ibs", float("nan")))
+                            _rsi2 = float(_last.get("rsi2", float("nan")))
+                            _dpct = float(_last.get("day_return_pct", float("nan")))
+                            if not _last.get("ONG_signal", False):
+                                print(f"  [ONG] {_ticker}: No signal "
+                                      f"(IBS={_ibs:.3f} RSI2={_rsi2:.1f} ret={_dpct:.1f}%)")
+                                continue
+                            # Calculate ATR for position sizing
+                            _atr_s = ta.atr(_df_sig["high"], _df_sig["low"],
+                                            _df_sig["close"], length=_atr_period)
+                            if _atr_s is None or pd.isna(_atr_s.iloc[-1]):
+                                print(f"  [ONG] {_ticker}: Signal but ATR unavailable — skip")
+                                continue
+                            _atr_val = float(_atr_s.iloc[-1])
+                            if _atr_val <= 0:
+                                continue
+                            # ONG: size = max_risk_per_trade / (ATR × atr_risk_multiplier)
+                            _size = int(_ong_max_risk / (_atr_val * _atr_mult))
+                            _size = max((_size // 100) * 100, 100)
+                            # SL = close × (1 + stop_loss_pct/100), e.g. -1% → close × 0.99
+                            # ONG never hits SL via position-management loop — exits at open next day
+                            _sl = _c * (1.0 + _sl_pct)
+                            _tp = _c * 1.05             # placeholder TP (exit at next day open)
+                            _notional = _c * _size
+                            print(f"  [{now_str}] [ONG] ✅ Signal: {_ticker} "
+                                  f"IBS={_ibs:.3f} RSI2={_rsi2:.1f} ret={_dpct:.1f}% "
+                                  f"ATR={_atr_val:.0f} size={_size} "
+                                  f"notional={_notional:,.0f} close={_c:.0f}")
+                            print(f"  [{now_str}] [ONG] >>> ENTRY BUY {_ticker}: "
+                                  f"price={_c:.0f} size={_size} "
+                                  f"MTT={ONG_MARGIN_TRADE_TYPE} (一般信用長期)")
+                            ong_order_mgr.entry(
+                                _ticker, "BUY", _c, _size,
+                                stop_loss=_sl, take_profit=_tp,
+                                reason=(f"ONG IBS={_ibs:.3f} RSI2={_rsi2:.1f} "
+                                        f"ret={_dpct:.1f}%"),
+                                session="ONG",
+                                exchange=DEFAULT_ORDER_EXCHANGE,
+                            )
+                            time.sleep(ORDER_INTERVAL_SEC)
+                        except Exception as _e:
+                            print(f"  ⚠️ [ONG] {_ticker} error: {_e}")
+
             time.sleep(live_cfg["interval"]["price_check_sec"])
 
     except KeyboardInterrupt:
@@ -967,6 +1399,13 @@ def main():
         print(f"  Open positions: {len(order_mgr.positions)}")
         if order_mgr.trades:
             print(order_mgr.get_daily_summary())
+        if ong_order_mgr and (ong_order_mgr.trades or ong_order_mgr.positions):
+            ong_pnl = sum(t.pnl for t in ong_order_mgr.trades)
+            print(f"  [ONG] trades={len(ong_order_mgr.trades)} PnL={ong_pnl:+,.0f}円 "
+                  f"open={len(ong_order_mgr.positions)}")
+        if sm_order_mgr and sm_order_mgr.trades:
+            sm_pnl = sum(t.pnl for t in sm_order_mgr.trades)
+            print(f"  [SM]  trades={len(sm_order_mgr.trades)} PnL={sm_pnl:+,.0f}円")
 
 
 if __name__ == "__main__":
