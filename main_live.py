@@ -35,8 +35,11 @@ from strategy.simple_momentum import SimpleMomentumEngine
 from strategy.universe import UNIVERSE
 from backtest.screener import screen_stocks
 
-# Minimum completed 5-min bars required for signal calculation
-MIN_BARS = 10
+# Minimum completed bars required for AM signal calculation (3min×6=18min wait)
+MIN_BARS = 6
+# Bar interval (minutes) for AM and PM sessions
+AM_BAR_INTERVAL_MIN = 3  # AM uses 3-min bars (start trading ~9:18)
+PM_BAR_INTERVAL_MIN = 5  # PM uses 5-min bars (cooldown time calculation)
 
 VERSION = "v18.0"
 
@@ -679,16 +682,17 @@ def main():
     am_cd_enabled = am_cd.get("enabled", False)
     am_cd_loss_bars = am_cd.get("bars_after_loss", 15)
     am_cd_win_bars = am_cd.get("bars_after_win", 5)
-    bar_interval = 5
-    am_cd_loss_min = am_cd_loss_bars * bar_interval
-    am_cd_win_min = am_cd_win_bars * bar_interval
+    am_bar_interval = AM_BAR_INTERVAL_MIN
+    pm_bar_interval = PM_BAR_INTERVAL_MIN
+    am_cd_loss_min = am_cd_loss_bars * am_bar_interval
+    am_cd_win_min = am_cd_win_bars * am_bar_interval
 
     pm_cd = afternoon_cfg.get("cooldown", {}) if afternoon_cfg else {}
     pm_cd_enabled = pm_cd.get("enabled", False)
     pm_cd_loss_bars = pm_cd.get("bars_after_loss", 6)
     pm_cd_win_bars = pm_cd.get("bars_after_win", 2)
-    pm_cd_loss_min = pm_cd_loss_bars * bar_interval
-    pm_cd_win_min = pm_cd_win_bars * bar_interval
+    pm_cd_loss_min = pm_cd_loss_bars * pm_bar_interval
+    pm_cd_win_min = pm_cd_win_bars * pm_bar_interval
 
     order_mgr.cooldown_config = {
         "am_enabled": am_cd_enabled,
@@ -699,7 +703,7 @@ def main():
         "pm_win_min": pm_cd_win_min,
     }
 
-    bar_builder = BarBuilder(bar_interval_min=5)
+    bar_builder = BarBuilder(bar_interval_min=AM_BAR_INTERVAL_MIN)  # AM uses 3-min bars
 
     print(f"\nLoading EnsembleEngine (AM)...")
     am_engine = EnsembleEngine("config/strategy_config.yaml")
@@ -777,7 +781,7 @@ def main():
               f"risk_per_pos={sm_cfg['global']['risk_per_position']}")
     else:
         print("  [SM] disabled")
-    print(f"  Min bars: {MIN_BARS}")
+    print(f"  Min bars (AM): {MIN_BARS} × {am_bar_interval}min = {MIN_BARS * am_bar_interval}min wait")
     print(f"  Force close: PM@{pm_force_close} / All@1520")
 
     # ONG: Recover open ONG positions from /positions at startup
