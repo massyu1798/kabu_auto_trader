@@ -1,11 +1,11 @@
 # ============================================
 # 午後リバーサル戦略パラメータ v1.2
 # v1.0ベース + SLタイト化 + TP近接化
-# v13: initial_capital 700万
+# v18.0: initial_capital 700万→1000万
 # ============================================
 
 global:
-  initial_capital: 7000000
+  initial_capital: 10000000
   max_positions: 3
   risk_per_trade: 0.006
   max_daily_loss: 0.02
