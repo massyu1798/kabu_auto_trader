@@ -14,8 +14,8 @@ mode:
 trade:
   initial_capital: 10000000       # 1000万（AM/PMの信用取引上限）
   max_positions: 4                # 本番リスク制約：最大同時ポジション数（2〜4銘柄）
-  max_notional_per_position: 3000000  # 本番リスク制約：1ポジあたり最大建玉金額（円）
-  max_total_exposure: 10000000    # 本番リスク制約：合計最大建玉金額（円）
+  max_notional_per_position: 5000000  # 本番リスク制約：1ポジあたり最大建玉金額（500万円）
+  max_total_exposure: 10000000    # 本番リスク制約：合計最大建玉金額（1000万円）
   risk_per_trade: 0.008           # BT strategy_config.global.risk_per_trade に合わせる
   max_daily_loss: 0.03            # BT strategy_config.global.max_daily_loss に合わせる
   # 信用区分（MarginTradeType）
