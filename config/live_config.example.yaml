@@ -101,3 +101,21 @@ watchlist:
 interval:
   price_check_sec: 30
   signal_check_sec: 300
+
+# ── オーバーナイトギャップ (ONG) 設定 ───────────────────────────────────
+# エントリー: 14:50-15:00 引け前成行買い（MarginTradeType=2: 一般信用長期）
+# エグジット: 翌営業日 9:00-9:05 寄り付き成行売り
+ong:
+  enabled: true
+  max_positions: 2              # ONG最大同時保有銘柄数（AM/PMとは独立）
+  margin_trade_type: 2          # 一般信用（長期）※デイトレ(=3)では持ち越し不可
+  # エントリー条件・サイジングは config/overnight_config.yaml で設定
+
+# ── シンプル順張り (SM) 設定 ──────────────────────────────────────────
+# シグナル: 11:25 前場騰落率評価
+# エントリー: 11:30 成行
+# エグジット: 12:30 後場寄り成行
+sm:
+  enabled: true
+  max_positions_per_side: 2     # 片側最大2銘柄（ロング2+ショート2=最大4）
+  # 詳細条件・サイジングは config/simple_momentum_config.yaml で設定
